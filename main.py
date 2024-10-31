@@ -86,19 +86,19 @@ def discord_channel_to_slack_channel(discord_channel_id):
 
 
 @slack_events_adapter.on("reaction_added")
-async def reaction_added(event_data):
+def reaction_added(event_data):
     emoji = event_data["event"]["reaction"]
     print(emoji)
 
 @slack_events_adapter.on("message")
-async def handle_message(event_data):
+def handle_message(event_data):
     message = event_data["event"]
     # If the incoming message contains "hi", then respond with a "Hello" message
     if message.get("subtype") is None and "hi458" in message.get('text'):
         channel = message["channel"]
         print(channel)
         message = "Hello <@%s>! :tada:" % message["user"]
-        await sclient.chat_postMessage(channel=channel, text=message)
+        sclient.chat_postMessage(channel=channel, text=message)
 
 @slack_events_adapter.on("member_joined_channel")
 def handle_member_joined_channel(event_data):
