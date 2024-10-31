@@ -13,6 +13,7 @@ import asyncio
 dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 discord_server_id = 1301317329333784668
 main_discord_server_object = None
+allowed_channels = ["hackclub-discord-bridge-management"] # Blank means all channel are allowed, this had to be added because of hack club things
 
 sclient = WebClient(token=open("slack_token", "r").read())
 
@@ -30,7 +31,6 @@ except json.decoder.JSONDecodeError:
 
 sc_to_dc = {v: k for k, v in dc_to_sc.items()} # Swap the discord to slack channel dictionary around so that a discord channel can be looked up from the slack channel
 
-discord_channel_to_webhook_id = {}
 
 def refresh_channel_cache_file():
     sc_to_dc = {v: k for k, v in dc_to_sc.items()}
@@ -70,7 +70,11 @@ def slack_channel_to_discord_channel(slack_channel_id):
         return sc_to_dc[slack_channel_id]
     except KeyError:
         slack_chan_name = get_slack_channel_name(slack_channel_id)
+        if not (allowed_channels == None or slack_chan_name in allowed_channels):
+            return None
         discord_channel = get_discord_channel_object_from_name(slack_chan_name)
+        if discord_channel == None:
+            return None
         dc_to_sc[discord_channel.id] = slack_channel_id
         refresh_channel_cache_file()
         return discord_channel.id
@@ -81,33 +85,32 @@ def discord_channel_to_slack_channel(discord_channel_id):
     try: # Try get the id from a cache
         return dc_to_sc[discord_channel_id]
     except KeyError:
-        discord_chan_name = get_discord_channel_object_from_id(discord_channel_id).name
+        discord_channel = get_discord_channel_object_from_id(discord_channel_id)
+        if discord_channel == None:
+            return
+        discord_chan_name = discord_channel.name
+        if not (allowed_channels == None or discord_chan_name in allowed_channels):
+            return
         slack_channel_id = get_slack_channel_id(discord_chan_name)
+        if slack_channel_id == None:
+            return None
         dc_to_sc[discord_channel_id] = slack_channel_id
         refresh_channel_cache_file()
         return slack_channel_id
 
 async def send_with_webhook(discord_channel_id, message, username, avatar_url):
-    print(1)
     channel = dbot.get_channel(discord_channel_id)
-    print(2)
     webhooks = await channel.webhooks()
-    print(3)
     webhook = None
-    print(4)
     if webhooks:
-        print(5)
         for wh in webhooks:
             print(wh)
             if wh.user.id == dbot.user.id:
-                print(6)
                 webhook = wh
                 break
-    print(7)
     if not webhook:
-        print(8)
+        print(f"Creating new webhook in #{channel.name}")
         webhook = await channel.create_webhook(name="Slack Link")
-        print(9)
     print(f"Sending message to {webhook}: {message}, {username}, {avatar_url}")
     await webhook.send(content=message, username=username, avatar_url=avatar_url)
 
@@ -118,7 +121,7 @@ def reaction_added(event_data):
     emoji = event_data["event"]["reaction"]
     print(emoji)
 
-@slack_events_adapter.on("message")
+@slack_events_adapter.on("message") # Slack message listening, send to discord
 def handle_message(event_data):
     message = event_data["event"]
     # If the incoming message contains "hi", then respond with a "Hello" message
@@ -128,28 +131,23 @@ def handle_message(event_data):
         message = "Hello <@%s>! :tada:" % message["user"]
         sclient.chat_postMessage(channel=channel, text=message)
 
-    print(message)
-    print(sclient.users_info(user=message["user"])["user"])
-    try:
-        user_info = sclient.users_info(user=message["user"])["user"]
-        display_name = user_info["profile"]["display_name"]
-        avatar_url = user_info["profile"]["image_original"]
-    except SlackApiError as e:
-        print(f"Error getting user profile info: {e}")
-        display_name = "Anon"
-        avatar_url = "https://cloud-mixfq3elm-hack-club-bot.vercel.app/0____.png"
-
-    #asyncio.create_task(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url, discord_channel_id=slack_channel_to_discord_channel(message["channel"])))
-    #asyncio.run(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
-                          #discord_channel_id=slack_channel_to_discord_channel(message["channel"])))
-    asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
-                          discord_channel_id=slack_channel_to_discord_channel(message["channel"])), dbot.loop)
-
-#@slack_events_adapter.on("/discord_link")
-#def handle_member_joined_channel(event_data):
-    #joined_user_id = event_data["user"]
-    #print(event_data)
-
+    elif message.get("subtype") is None:
+        try:
+            user_info = sclient.users_info(user=message["user"])["user"]
+            display_name = user_info["profile"]["display_name"]
+            try:
+                avatar_url = user_info["profile"]["image_original"]
+            except KeyError:
+                avatar_url = user_info["profile"]["image_512"]
+        except SlackApiError as e:
+            print(f"Error getting user profile info: {e}")
+            display_name = "Anon"
+            avatar_url = "https://cloud-mixfq3elm-hack-club-bot.vercel.app/0____.png"
+        discord_channel = slack_channel_to_discord_channel(message["channel"])
+        if discord_channel == None:
+            return
+        asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
+                              discord_channel_id=discord_channel), dbot.loop)
 
 
 
@@ -161,15 +159,19 @@ async def on_ready():
     print(slack_channel_to_discord_channel("C0P5NE354"))
 
 @dbot.event
-async def on_message(message):
+async def on_message(message): # Discord message listening, send to slack
     # don't respond to ourselves
     if message.author == dbot.user:
         return
-    if message.webhook_id != None: # Don't repost messages from the webhook
+    elif message.webhook_id != None: # Don't repost messages from the webhook
         return
-
-    if message.guild.id == discord_server_id:
+    elif message.channel.type in ["public_thread", "private_thread"]:
+        message.reply("Sorry, threads aren't supported yet!")
+        return
+    elif message.guild.id == discord_server_id:
         slack_channel_id = discord_channel_to_slack_channel(message.channel.id)
+        if slack_channel_id == None:
+            return
         try:
             sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url)
         except SlackApiError as e:
