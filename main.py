@@ -8,12 +8,17 @@ from slack_sdk.errors import SlackApiError
 
 import threading
 
+dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
+
 sclient = WebClient(token=open("slack_token", "r").read())
 
 SLACK_SIGNING_SECRET = open("slack_signing_secret", "r").read()
 slack_events_adapter = SlackEventAdapter(SLACK_SIGNING_SECRET, endpoint="/slack/events")
 
-def get_channel_name(channel_id):
+dtos = {} # USE THIS MAINLY, the other one is just a copy of this but reversed
+stod = {v: k for k, v in dtos.items()} # Swap the discord to slack channel dictionary around so that a discord channel can be looked up from the slack channel
+
+def get_slack_channel_name(channel_id):
     try:
         response = sclient.conversations_info(channel=channel_id)
         channel_name = response['channel']['name']
@@ -37,18 +42,18 @@ def handle_message(event_data):
         message = "Hello <@%s>! :tada:" % message["user"]
         sclient.chat_postMessage(channel=channel, text=message)
 
-class DisClient(discord.Client):
-    async def on_ready(self):
-        print('Logged on as', self.user)
 
-    async def on_message(self, message):
-        # don't respond to ourselves
-        if message.author == self.user:
-            return
+@dbot.event
+async def on_ready():
+    print('Logged on as', dbot.user)
 
-        sclient.chat_postMessage(channel="#bot-spam", text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url)
+@dbot.event
+async def on_message(message):
+    # don't respond to ourselves
+    if message.author == dbot.user:
+        return
 
-
+    sclient.chat_postMessage(channel="#bot-spam", text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url)
 
 #slack_events_adapter.start(port=3000)
 slack_thread = threading.Thread(target=slack_events_adapter.start, kwargs={'port': 3000})
@@ -56,5 +61,4 @@ slack_thread.start()
 
 intents = discord.Intents.all()
 intents.message_content = True
-dclient = DisClient(intents=intents)
-dclient.run(open("discord_token", "r").read())
+dbot.run(open("discord_token", "r").read())
