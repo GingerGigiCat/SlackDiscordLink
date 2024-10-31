@@ -29,6 +29,11 @@ except json.decoder.JSONDecodeError:
 
 sc_to_dc = {v: k for k, v in dc_to_sc.items()} # Swap the discord to slack channel dictionary around so that a discord channel can be looked up from the slack channel
 
+def refresh_channel_cache_file():
+    sc_to_dc = {v: k for k, v in dc_to_sc.items()}
+    with open("discord_to_slack_channel.json", "w+") as the_file:  # Save the cache to a file
+        json.dump(dc_to_sc, the_file)
+
 def get_slack_channel_name(channel_id):
     try:
         response = sclient.conversations_info(channel=channel_id)
@@ -64,9 +69,7 @@ def slack_channel_to_discord_channel(slack_channel_id):
         slack_chan_name = get_slack_channel_name(slack_channel_id)
         discord_channel = get_discord_channel_object_from_name(slack_chan_name)
         dc_to_sc[discord_channel.id] = slack_channel_id
-        sc_to_dc = {v: k for k, v in dc_to_sc.items()}
-        with open("discord_to_slack_channel.json", "w+") as the_file: # Save the cache to a file
-            json.dump(dc_to_sc, the_file)
+        refresh_channel_cache_file()
         return discord_channel.id
 
 def discord_channel_to_slack_channel(discord_channel_id):
@@ -76,22 +79,32 @@ def discord_channel_to_slack_channel(discord_channel_id):
         return dc_to_sc[discord_channel_id]
     except KeyError:
         discord_chan_name = get_discord_channel_object_from_id(discord_channel_id).name
+        slack_channel_id = get_slack_channel_id(discord_chan_name)
+        dc_to_sc[discord_channel_id] = slack_channel_id
+        refresh_channel_cache_file()
+        return slack_channel_id
 
 
 @slack_events_adapter.on("reaction_added")
-def reaction_added(event_data):
+async def reaction_added(event_data):
     emoji = event_data["event"]["reaction"]
     print(emoji)
 
 @slack_events_adapter.on("message")
-def handle_message(event_data):
+async def handle_message(event_data):
     message = event_data["event"]
     # If the incoming message contains "hi", then respond with a "Hello" message
     if message.get("subtype") is None and "hi458" in message.get('text'):
         channel = message["channel"]
         print(channel)
         message = "Hello <@%s>! :tada:" % message["user"]
-        sclient.chat_postMessage(channel=channel, text=message)
+        await sclient.chat_postMessage(channel=channel, text=message)
+
+@slack_events_adapter.on("member_joined_channel")
+def handle_member_joined_channel(event_data):
+    joined_user_id = event_data["user"]
+    print(event_data["user"])
+
 
 
 @dbot.event
@@ -107,7 +120,12 @@ async def on_message(message):
     if message.author == dbot.user:
         return
 
-    sclient.chat_postMessage(channel="#bot-spam", text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url)
+    if message.guild.id == discord_server_id:
+        slack_channel_id = discord_channel_to_slack_channel(message.channel.id)
+        try:
+            sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url)
+        except SlackApiError as e:
+            print(f"Error sending message to slack: {e}")
 
 #slack_events_adapter.start(port=3000)
 slack_thread = threading.Thread(target=slack_events_adapter.start, kwargs={'port': 3000})
