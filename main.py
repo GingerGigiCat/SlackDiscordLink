@@ -9,6 +9,8 @@ import json
 import os
 import threading
 import asyncio
+import concurrent.futures
+import functools
 
 dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 discord_server_id = 1301317329333784668
@@ -22,10 +24,11 @@ slack_events_adapter = SlackEventAdapter(SLACK_SIGNING_SECRET, endpoint="/slack/
 
 
 try:
-    with open("discord_to_slack_channel.json", "w+") as the_file:
+    with open("./discord_to_slack_channel.json", "r+") as the_file:
         dc_to_sc = json.load(the_file)
-except json.decoder.JSONDecodeError:
-    with open("discord_to_slack_channel.json", "w+") as the_file:
+except json.decoder.JSONDecodeError as e:
+    print(e)
+    with open("./discord_to_slack_channel.json", "w+") as the_file:
         the_file.write("{}")
         dc_to_sc = {}
 
@@ -34,7 +37,7 @@ sc_to_dc = {v: k for k, v in dc_to_sc.items()} # Swap the discord to slack chann
 
 def refresh_channel_cache_file():
     sc_to_dc = {v: k for k, v in dc_to_sc.items()}
-    with open("discord_to_slack_channel.json", "w+") as the_file:  # Save the cache to a file
+    with open("./discord_to_slack_channel.json", "w+") as the_file:  # Save the cache to a file
         json.dump(dc_to_sc, the_file)
 
 def get_slack_channel_name(channel_id):
@@ -55,6 +58,7 @@ def get_slack_channel_id(channel_name):
         return None
     except SlackApiError as e:
         print(f"Error fetching channel info: {e.response['error']}")
+        print(e.response.headers["Retry-After"])
         return None
 
 def get_discord_channel_object_from_name(channel_name):
@@ -67,7 +71,7 @@ def slack_channel_to_discord_channel(slack_channel_id):
     global sc_to_dc
     global dc_to_sc
     try: # Try get the id from a cache
-        return sc_to_dc[slack_channel_id]
+        return sc_to_dc[str(slack_channel_id)]
     except KeyError:
         slack_chan_name = get_slack_channel_name(slack_channel_id)
         if not (allowed_channels == None or slack_chan_name in allowed_channels):
@@ -75,7 +79,7 @@ def slack_channel_to_discord_channel(slack_channel_id):
         discord_channel = get_discord_channel_object_from_name(slack_chan_name)
         if discord_channel == None:
             return None
-        dc_to_sc[discord_channel.id] = slack_channel_id
+        dc_to_sc[str(discord_channel.id)] = slack_channel_id
         refresh_channel_cache_file()
         return discord_channel.id
 
@@ -83,7 +87,7 @@ def discord_channel_to_slack_channel(discord_channel_id):
     global dc_to_sc
     global sc_to_dc
     try: # Try get the id from a cache
-        return dc_to_sc[discord_channel_id]
+        return dc_to_sc[str(discord_channel_id)]
     except KeyError:
         discord_channel = get_discord_channel_object_from_id(discord_channel_id)
         if discord_channel == None:
@@ -94,7 +98,7 @@ def discord_channel_to_slack_channel(discord_channel_id):
         slack_channel_id = get_slack_channel_id(discord_chan_name)
         if slack_channel_id == None:
             return None
-        dc_to_sc[discord_channel_id] = slack_channel_id
+        dc_to_sc[str(discord_channel_id)] = slack_channel_id
         refresh_channel_cache_file()
         return slack_channel_id
 
@@ -144,10 +148,11 @@ def handle_message(event_data):
             display_name = "Anon"
             avatar_url = "https://cloud-mixfq3elm-hack-club-bot.vercel.app/0____.png"
         discord_channel = slack_channel_to_discord_channel(message["channel"])
-        if discord_channel == None:
+        if discord_channel is None:
+            print("Discord channel not found")
             return
         asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
-                              discord_channel_id=discord_channel), dbot.loop)
+                              discord_channel_id=int(discord_channel)), dbot.loop)
 
 
 
@@ -169,11 +174,13 @@ async def on_message(message): # Discord message listening, send to slack
         message.reply("Sorry, threads aren't supported yet!")
         return
     elif message.guild.id == discord_server_id:
-        slack_channel_id = discord_channel_to_slack_channel(message.channel.id)
+        print("a")
+        slack_channel_id = await dbot.loop.run_in_executor(None, functools.partial(discord_channel_to_slack_channel, message.channel.id))
+        print(2)
         if slack_channel_id == None:
             return
         try:
-            sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url)
+            await dbot.loop.run_in_executor(None, functools.partial(sclient.chat_postMessage, channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url))
         except SlackApiError as e:
             print(f"Error sending message to slack: {e}")
 
