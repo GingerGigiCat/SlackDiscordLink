@@ -29,6 +29,7 @@ def convertBold(content, is_slack):
             if i % 2 != 0:
                 content = content.replace(f'**{raw}**', f'*{raw}*')
             print(raw)
+            i += 1
     return content
     pass
 # examplestrSlack = " txtbeforelink0 <https://saahild.com|test content> txtafterlink0 txtbef1 <https://zeon.saahild.com|zeon> txtaft1 *Bold text* *bt2*"
