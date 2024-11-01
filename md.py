@@ -24,7 +24,10 @@ def convertBold(content, is_slack):
             i += 1
     else:
         found_links = content.split('**')
+        i = 0
         for raw in found_links:
+            if i % 2 != 0:
+                content = content.replace(f'**{raw}**', f'*{raw}*')
             print(raw)
     return content
     pass
