@@ -11,6 +11,11 @@ import threading
 import asyncio
 import concurrent.futures
 import functools
+import sqlite3
+
+
+print("REMEMBER TO START NGROK")
+
 
 dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 discord_server_id = 1301317329333784668
@@ -18,10 +23,13 @@ main_discord_server_object = None
 allowed_channels = ["hackclub-discord-bridge-management"] # Blank means all channel are allowed, this had to be added because of hack club things
 
 sclient = WebClient(token=open("slack_token", "r").read())
-
 SLACK_SIGNING_SECRET = open("slack_signing_secret", "r").read()
 slack_events_adapter = SlackEventAdapter(SLACK_SIGNING_SECRET, endpoint="/slack/events")
 
+database_name = "main.db"
+
+with sqlite3.connect(database_name) as conn:
+    print("did the thing")
 
 try:
     with open("./discord_to_slack_channel.json", "r+") as the_file:
@@ -33,6 +41,50 @@ except json.decoder.JSONDecodeError as e:
         dc_to_sc = {}
 
 sc_to_dc = {v: k for k, v in dc_to_sc.items()} # Swap the discord to slack channel dictionary around so that a discord channel can be looked up from the slack channel
+
+
+def try_setup_sql_first_time():
+    messages_table_statement = """
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        unix_timestamp INT NOT NULL,
+        
+        message_text TEXT NOT NULL,
+        slack_message_ts TEXT NOT NULL,
+        discord_message_id INT NOT NULL,
+        slack_thread_ts TEXT not null,
+        slack_channel_id TEXT NOT NULL,
+        discord_channel_id INT NOT NULL,
+        slack_author_id TEXT NOT NULL,
+        discord_author_id INT NOT NULL
+    )
+    """
+
+    channels_table_statement = """
+    CREATE TABLE IF NOT EXISTS channels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        
+        slack_channel_id TEXT NOT NULL,
+        discord_channel_id INT NOT NULL,
+        is_thread INT NOT NULL,
+        slack_thread_ts TEXT NOT NULL,
+        send_to_slack_allowed INT NOT NULL,
+        communicate_allowed INT NOT NULL
+    )
+    """
+
+    try:
+        with sqlite3.connect(database_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(messages_table_statement) # Create the table of messages if it doesn't exist
+            cursor.execute(channels_table_statement) # Create the table of channels if it doesn't exist
+
+            conn.commit()
+            print("Yay made the tables")
+    except sqlite3.OperationalError as e:
+        print("Failed to create tables:", e)
+
+#def db_add_message(slack_message_data, discord_channel_id, discord_message_id):
 
 
 def refresh_channel_cache_file():
@@ -116,7 +168,7 @@ async def send_with_webhook(discord_channel_id, message, username, avatar_url):
         print(f"Creating new webhook in #{channel.name}")
         webhook = await channel.create_webhook(name="Slack Link")
     print(f"Sending message to {webhook}: {message}, {username}, {avatar_url}")
-    await webhook.send(content=message, username=username, avatar_url=avatar_url)
+    return await webhook.send(content=message, username=username, avatar_url=avatar_url, wait=True)
 
 
 
@@ -128,14 +180,10 @@ def reaction_added(event_data):
 @slack_events_adapter.on("message") # Slack message listening, send to discord
 def handle_message(event_data):
     message = event_data["event"]
-    # If the incoming message contains "hi", then respond with a "Hello" message
-    if message.get("subtype") is None and "hi458" in message.get('text'):
-        channel = message["channel"]
-        print(channel)
-        message = "Hello <@%s>! :tada:" % message["user"]
-        sclient.chat_postMessage(channel=channel, text=message)
 
-    elif message.get("subtype") is None:
+    if message.get("subtype") is None:
+        print(message)
+        print(event_data)
         try:
             user_info = sclient.users_info(user=message["user"])["user"]
             display_name = user_info["profile"]["display_name"]
@@ -151,8 +199,16 @@ def handle_message(event_data):
         if discord_channel is None:
             print("Discord channel not found")
             return
-        asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
+        #db_add_message(slack_message_data=message, discord_channel_id=discord_channel.id)
+        sent_discord_message_object = asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
                               discord_channel_id=int(discord_channel)), dbot.loop)
+        messages_insert_statement = f"""
+        INSERT INTO messages(message_text, slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        with sqlite3.connect(database_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(messages_insert_statement, (message["text"], message["ts"], sent_discord_message_object.id, ))
 
 
 
@@ -174,13 +230,12 @@ async def on_message(message): # Discord message listening, send to slack
         message.reply("Sorry, threads aren't supported yet!")
         return
     elif message.guild.id == discord_server_id:
-        print("a")
         slack_channel_id = await dbot.loop.run_in_executor(None, functools.partial(discord_channel_to_slack_channel, message.channel.id))
-        print(2)
+        #print(2)
         if slack_channel_id == None:
             return
         try:
-            await dbot.loop.run_in_executor(None, functools.partial(sclient.chat_postMessage, channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url))
+            await dbot.loop.run_in_executor(None, functools.partial(sclient.chat_postMessage, channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url)) # , thread_ts="1730500285.549289"
         except SlackApiError as e:
             print(f"Error sending message to slack: {e}")
 
