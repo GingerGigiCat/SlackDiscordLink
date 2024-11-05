@@ -1,9 +1,12 @@
 import discord
 from discord.ext import commands
-import slack_sdk
-from slackeventsapi import SlackEventAdapter
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
+
+#import slack_sdk
+#from slackeventsapi import SlackEventAdapter
+from slack_bolt.async_app import AsyncApp
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.error import *
+
 
 import json
 import os
@@ -22,9 +25,13 @@ discord_server_id = 1301317329333784668
 main_discord_server_object = None
 allowed_channels = ["hackclub-discord-bridge-management"] # Blank means all channel are allowed, this had to be added because of hack club things
 
-sclient = WebClient(token=open("slack_token", "r").read())
-SLACK_SIGNING_SECRET = open("slack_signing_secret", "r").read()
-slack_events_adapter = SlackEventAdapter(SLACK_SIGNING_SECRET, endpoint="/slack/events")
+with open("slack_bot_token", "r") as token_f:
+    with open("slack_signing_secret", "r") as signing_secret_f:
+        sapp = AsyncApp(token=token_f.read(), signing_secret=signing_secret_f.read())
+
+#sclient = WebClient(token=open("slack_bot_token", "r").read())
+#SLACK_SIGNING_SECRET = open("slack_signing_secret", "r").read()
+#slack_events_adapter = SlackEventAdapter(SLACK_SIGNING_SECRET, endpoint="/slack/events")
 
 database_name = "main.db"
 
@@ -47,7 +54,6 @@ def try_setup_sql_first_time():
     messages_table_statement = """
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        unix_timestamp INT NOT NULL,
         
         message_text TEXT NOT NULL,
         slack_message_ts TEXT NOT NULL,
@@ -84,42 +90,55 @@ def try_setup_sql_first_time():
     except sqlite3.OperationalError as e:
         print("Failed to create tables:", e)
 
-#def db_add_message(slack_message_data, discord_channel_id, discord_message_id):
+async def db_add_message(s_message_data, d_message_object):
+    messages_insert_statement = f"""
+    INSERT INTO messages(message_text, slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    try:
+        slack_thread_ts = s_message_data["slack_thread_ts"]
+    except KeyError:
+        slack_thread_ts = ""
+    with sqlite3.connect(database_name) as conn:
+        cursor = conn.cursor()
+        cursor.execute(messages_insert_statement, (s_message_data["text"], s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], d_message_object.author.id))
 
 
-def refresh_channel_cache_file():
+async def refresh_channel_cache_file():
     sc_to_dc = {v: k for k, v in dc_to_sc.items()}
     with open("./discord_to_slack_channel.json", "w+") as the_file:  # Save the cache to a file
         json.dump(dc_to_sc, the_file)
 
-def get_slack_channel_name(channel_id):
+async def get_slack_channel_name(channel_id):
+    sclient = sapp.client
     try:
-        response = sclient.conversations_info(channel=channel_id)
+        response = await sclient.conversations_info(channel=channel_id)
         channel_name = response['channel']['name']
         return channel_name
-    except SlackApiError as e:
-        print(f"Error fetching channel info: {e.response['error']}")
+    except BoltError as e:
+        print(f"Error fetching channel info: {e}")
         return None
 
-def get_slack_channel_id(channel_name):
+async def get_slack_channel_id(channel_name):
+    sclient = sapp.client
     try:
-        for result in sclient.conversations_list():
+        for result in await sclient.conversations_list():
             for channel in result['channels']:
                 if channel['name'] == channel_name:
                     return channel['id']
         return None
-    except SlackApiError as e:
-        print(f"Error fetching channel info: {e.response['error']}")
-        print(e.response.headers["Retry-After"])
+    except BoltError as e:
+        print(f"Error fetching channel info: {e}")
+        #print(e.response.headers["Retry-After"])
         return None
 
-def get_discord_channel_object_from_name(channel_name):
+async def get_discord_channel_object_from_name(channel_name):
     return discord.utils.get(main_discord_server_object.channels, name=channel_name)
 
-def get_discord_channel_object_from_id(channel_id):
+async def get_discord_channel_object_from_id(channel_id):
     return discord.utils.get(main_discord_server_object.channels, id=channel_id)
 
-def slack_channel_to_discord_channel(slack_channel_id):
+async def slack_channel_to_discord_channel(slack_channel_id):
     global sc_to_dc
     global dc_to_sc
     try: # Try get the id from a cache
@@ -135,7 +154,7 @@ def slack_channel_to_discord_channel(slack_channel_id):
         refresh_channel_cache_file()
         return discord_channel.id
 
-def discord_channel_to_slack_channel(discord_channel_id):
+async def discord_channel_to_slack_channel(discord_channel_id):
     global dc_to_sc
     global sc_to_dc
     try: # Try get the id from a cache
@@ -172,43 +191,40 @@ async def send_with_webhook(discord_channel_id, message, username, avatar_url):
 
 
 
-@slack_events_adapter.on("reaction_added")
-def reaction_added(event_data):
-    emoji = event_data["event"]["reaction"]
+@sapp.event("reaction_added")
+async def reaction_added(event, say):
+    emoji = event["event"]["reaction"]
     print(emoji)
 
-@slack_events_adapter.on("message") # Slack message listening, send to discord
-def handle_message(event_data):
-    message = event_data["event"]
+@sapp.event("message") # Slack message listening, send to discord
+async def handle_message(event, say, ack):
+    await ack()
+    message = event
+    sclient = sapp.client
 
     if message.get("subtype") is None:
         print(message)
-        print(event_data)
+        #await say(":)")
         try:
-            user_info = sclient.users_info(user=message["user"])["user"]
+            user_info = (await sclient.users_info(user=message["user"]))["user"]
             display_name = user_info["profile"]["display_name"]
             try:
                 avatar_url = user_info["profile"]["image_original"]
             except KeyError:
                 avatar_url = user_info["profile"]["image_512"]
-        except SlackApiError as e:
+        except BoltError as e:
             print(f"Error getting user profile info: {e}")
             display_name = "Anon"
             avatar_url = "https://cloud-mixfq3elm-hack-club-bot.vercel.app/0____.png"
-        discord_channel = slack_channel_to_discord_channel(message["channel"])
+        discord_channel = await slack_channel_to_discord_channel(message["channel"])
         if discord_channel is None:
             print("Discord channel not found")
             return
-        #db_add_message(slack_message_data=message, discord_channel_id=discord_channel.id)
-        sent_discord_message_object = asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
-                              discord_channel_id=int(discord_channel)), dbot.loop)
-        messages_insert_statement = f"""
-        INSERT INTO messages(message_text, slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        with sqlite3.connect(database_name) as conn:
-            cursor = conn.cursor()
-            cursor.execute(messages_insert_statement, (message["text"], message["ts"], sent_discord_message_object.id, ))
+
+        sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
+                              discord_channel_id=int(discord_channel)), dbot.loop))
+
+        await db_add_message(s_message_data=message, d_message_object=sent_discord_message_object)
 
 
 
@@ -217,10 +233,11 @@ async def on_ready():
     global main_discord_server_object
     print('Logged on as', dbot.user)
     main_discord_server_object = dbot.get_guild(discord_server_id)
-    print(slack_channel_to_discord_channel("C0P5NE354"))
+    print(await slack_channel_to_discord_channel("C07V1V34W48"))
 
 @dbot.event
 async def on_message(message): # Discord message listening, send to slack
+    sclient = sapp.client
     # don't respond to ourselves
     if message.author == dbot.user:
         return
@@ -230,18 +247,27 @@ async def on_message(message): # Discord message listening, send to slack
         message.reply("Sorry, threads aren't supported yet!")
         return
     elif message.guild.id == discord_server_id:
-        slack_channel_id = await dbot.loop.run_in_executor(None, functools.partial(discord_channel_to_slack_channel, message.channel.id))
+        slack_channel_id = await discord_channel_to_slack_channel(message.channel.id)
         #print(2)
         if slack_channel_id == None:
             return
         try:
-            await dbot.loop.run_in_executor(None, functools.partial(sclient.chat_postMessage, channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url)) # , thread_ts="1730500285.549289"
-        except SlackApiError as e:
+            await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
+        except BoltError as e:
             print(f"Error sending message to slack: {e}")
 
+
+async def start_main():
+    with open("slack_app_token", "r") as token_f:
+        handler = AsyncSocketModeHandler(sapp, token_f.read())
+    await handler.start_async()
+
 #slack_events_adapter.start(port=3000)
-slack_thread = threading.Thread(target=slack_events_adapter.start, kwargs={'port': 3000})
-slack_thread.start()
+#slack_thread = threading.Thread(target=SocketModeHandler.start, args=('sapp', open("slack_bot_token", "r").read()))
+#asyncio.run((await AsyncSocketModeHandler(sapp, open("slack_bot_token", "r").read()).start_async()))
+#slack_thread.start()
+
+threading.Thread(target=asyncio.run, args=(start_main(),)).start()
 
 intents = discord.Intents.all()
 intents.message_content = True
