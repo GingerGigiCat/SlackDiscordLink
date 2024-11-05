@@ -108,7 +108,7 @@ async def db_add_message(s_message_data, d_message_object, source="slack"):
             cursor.execute(messages_insert_statement, (s_message_data["text"], s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], 0))
         elif source == "discord":
             cursor.execute(messages_insert_statement, (s_message_data["message"]["text"], s_message_data["message"]["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, "no", d_message_object.author.id))
-
+        conn.commit()
 
 async def refresh_channel_cache_file():
     sc_to_dc = {v: k for k, v in dc_to_sc.items()}
@@ -202,35 +202,48 @@ async def reaction_added(event, say):
     emoji = event["event"]["reaction"]
     print(emoji)
 
-@sapp.event("message") # Slack message listening, send to discord
+@sapp.event({"type": "message", "subtype": None}) # Slack message listening, send to discord
 async def handle_message(event, say, ack):
     await ack()
     message = event
     sclient = sapp.client
 
-    if message.get("subtype") is None:
-        print(message)
-        #await say(":)")
+    #await say(":)")
+    try:
+        user_info = (await sclient.users_info(user=message["user"]))["user"]
+        display_name = user_info["profile"]["display_name"]
         try:
-            user_info = (await sclient.users_info(user=message["user"]))["user"]
-            display_name = user_info["profile"]["display_name"]
-            try:
-                avatar_url = user_info["profile"]["image_original"]
-            except KeyError:
-                avatar_url = user_info["profile"]["image_512"]
-        except BoltError as e:
-            print(f"Error getting user profile info: {e}")
-            display_name = "Anon"
-            avatar_url = "https://cloud-mixfq3elm-hack-club-bot.vercel.app/0____.png"
-        discord_channel = await slack_channel_to_discord_channel(message["channel"])
-        if discord_channel is None:
-            print("Discord channel not found")
-            return
+            avatar_url = user_info["profile"]["image_original"]
+        except KeyError:
+            avatar_url = user_info["profile"]["image_512"]
+    except BoltError as e:
+        print(f"Error getting user profile info: {e}")
+        display_name = "Anon"
+        avatar_url = "https://cloud-mixfq3elm-hack-club-bot.vercel.app/0____.png"
+    discord_channel = await slack_channel_to_discord_channel(message["channel"])
+    if discord_channel is None:
+        print("Discord channel not found")
+        return
 
-        sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
-                              discord_channel_id=int(discord_channel)), dbot.loop))
+    sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
+                          discord_channel_id=int(discord_channel)), dbot.loop))
 
-        await db_add_message(s_message_data=message, d_message_object=sent_discord_message_object, source="slack")
+    await db_add_message(s_message_data=message, d_message_object=sent_discord_message_object, source="slack")
+
+
+@sapp.event(event={"type": "message", "subtype": "message_deleted"}) # Slack message deletion
+async def handle_slack_message_deletion(event, say, ack):
+    await ack()
+    message = event
+    print(message)
+    sclient = sapp.client
+
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["previous_message"]["ts"],))
+        record_id, discord_message_id, discord_channel_id = cur.fetchone()
+        discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(dbot.get_channel(discord_channel_id).fetch_message(discord_message_id), loop=dbot.loop))
+        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.delete(), loop=dbot.loop))
 
 
 
