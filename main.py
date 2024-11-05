@@ -90,7 +90,9 @@ def try_setup_sql_first_time():
     except sqlite3.OperationalError as e:
         print("Failed to create tables:", e)
 
-async def db_add_message(s_message_data, d_message_object):
+async def db_add_message(s_message_data, d_message_object, source="slack"):
+    print(s_message_data)
+    print(s_message_data)
     messages_insert_statement = f"""
     INSERT INTO messages(message_text, slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id)
     VALUES(?, ?, ?, ?, ?, ?, ?, ?)
@@ -101,7 +103,11 @@ async def db_add_message(s_message_data, d_message_object):
         slack_thread_ts = ""
     with sqlite3.connect(database_name) as conn:
         cursor = conn.cursor()
-        cursor.execute(messages_insert_statement, (s_message_data["text"], s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], d_message_object.author.id))
+        if source == "slack":
+            d_message_object.author.id = 0
+            cursor.execute(messages_insert_statement, (s_message_data["text"], s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], 0))
+        elif source == "discord":
+            cursor.execute(messages_insert_statement, (s_message_data["message"]["text"], s_message_data["message"]["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, "no", d_message_object.author.id))
 
 
 async def refresh_channel_cache_file():
@@ -224,7 +230,7 @@ async def handle_message(event, say, ack):
         sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
                               discord_channel_id=int(discord_channel)), dbot.loop))
 
-        await db_add_message(s_message_data=message, d_message_object=sent_discord_message_object)
+        await db_add_message(s_message_data=message, d_message_object=sent_discord_message_object, source="slack")
 
 
 
@@ -252,7 +258,8 @@ async def on_message(message): # Discord message listening, send to slack
         if slack_channel_id == None:
             return
         try:
-            await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
+            s_message = await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
+            await db_add_message(s_message_data=s_message, d_message_object=message, source="discord")
         except BoltError as e:
             print(f"Error sending message to slack: {e}")
 
