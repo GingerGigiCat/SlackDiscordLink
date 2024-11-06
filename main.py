@@ -236,14 +236,22 @@ async def handle_slack_message_deletion(event, say, ack):
     await ack()
     message = event
     print(message)
-    sclient = sapp.client
 
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["previous_message"]["ts"],))
         record_id, discord_message_id, discord_channel_id = cur.fetchone()
         discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(dbot.get_channel(discord_channel_id).fetch_message(discord_message_id), loop=dbot.loop))
-        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.delete(), loop=dbot.loop))
+        try:
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.delete(), loop=dbot.loop))
+        except discord.errors.NotFound:
+            conn.close()
+            return
+        cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
+        conn.commit()
+        conn.close()
+
+
 
 
 
@@ -275,6 +283,17 @@ async def on_message(message): # Discord message listening, send to slack
             await db_add_message(s_message_data=s_message, d_message_object=message, source="discord")
         except BoltError as e:
             print(f"Error sending message to slack: {e}")
+
+@dbot.event
+async def on_message_delete(message):
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (message.id,))
+        record_id, slack_message_ts, slack_channel_id = cur.fetchone()
+        await sapp.client.chat_delete(channel=slack_channel_id, ts=slack_message_ts)
+        cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
+        conn.commit()
+        conn.close()
 
 
 async def start_main():
