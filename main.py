@@ -23,6 +23,7 @@ print("REMEMBER TO START NGROK")
 dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 discord_server_id = 1301317329333784668
 main_discord_server_object = None
+allowed_mentions = discord.AllowedMentions(roles=False, everyone=False)
 allowed_channels = ["hackclub-discord-bridge-management"] # Blank means all channel are allowed, this had to be added because of hack club things
 
 with open("slack_bot_token", "r") as token_f:
@@ -193,7 +194,23 @@ async def send_with_webhook(discord_channel_id, message, username, avatar_url):
         print(f"Creating new webhook in #{channel.name}")
         webhook = await channel.create_webhook(name="Slack Link")
     print(f"Sending message to {webhook}: {message}, {username}, {avatar_url}")
-    return await webhook.send(content=message, username=username, avatar_url=avatar_url, wait=True)
+    return await webhook.send(content=message, username=username, avatar_url=avatar_url, wait=True, allowed_mentions=allowed_mentions)
+
+async def edit_with_webhook(discord_channel_id, message_id, text, thread=""):
+    channel = dbot.get_channel(discord_channel_id)
+    webhooks = await channel.webhooks()
+    webhook = None
+    if webhooks:
+        for wh in webhooks:
+            print(wh)
+            if wh.user.id == dbot.user.id:
+                webhook = wh
+                break
+    if not webhook:
+        print("No webhook found to edit!")
+        return
+    #print(f"Sending message to {webhook}: {message}, {username}, {avatar_url}")
+    return await webhook.edit_message(message_id=message_id, content=text, allowed_mentions=allowed_mentions)
 
 
 
@@ -252,6 +269,24 @@ async def handle_slack_message_deletion(event, say, ack):
         conn.close()
 
 
+@sapp.event(event={"type": "message", "subtype": "message_changed"}) # Slack message editing
+async def handle_slack_message_edit(event, say, ack):
+    await ack()
+    message = event["message"]
+    print(message)
+
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["ts"],))
+        record_id, discord_message_id, discord_channel_id = cur.fetchone()
+        discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(dbot.get_channel(discord_channel_id).fetch_message(discord_message_id), loop=dbot.loop))
+        try:
+            #await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.edit(content=message["text"]), loop=dbot.loop))
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(edit_with_webhook(discord_channel_id=discord_channel_id, message_id=discord_message_id, text=message["text"]), dbot.loop))
+        except discord.errors.NotFound as e:
+            print(e)
+        conn.close()
+
 
 
 
@@ -293,6 +328,18 @@ async def on_message_delete(message):
         await sapp.client.chat_delete(channel=slack_channel_id, ts=slack_message_ts)
         cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
         conn.commit()
+        conn.close()
+
+@dbot.event
+async def on_message_edit(ogmessage, newmessage):
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (newmessage.id,))
+        record_id, slack_message_ts, slack_channel_id = cur.fetchone()
+        try:
+            await sapp.client.chat_update(channel=slack_channel_id, ts=slack_message_ts, text=newmessage.content)
+        except BoltError as e:
+            print(f"Error sending message edit to slack: {e}")
         conn.close()
 
 
