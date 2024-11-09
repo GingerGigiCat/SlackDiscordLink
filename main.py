@@ -55,7 +55,7 @@ def try_setup_sql_first_time():
         
         slack_message_ts TEXT NOT NULL,
         discord_message_id INT NOT NULL,
-        slack_thread_ts TEXT not null,
+        slack_thread_ts TEXT,
         slack_channel_id TEXT NOT NULL,
         discord_channel_id INT NOT NULL,
         slack_author_id TEXT NOT NULL,
