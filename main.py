@@ -53,7 +53,6 @@ def try_setup_sql_first_time():
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         
-        message_text TEXT NOT NULL,
         slack_message_ts TEXT NOT NULL,
         discord_message_id INT NOT NULL,
         slack_thread_ts TEXT not null,
@@ -92,8 +91,8 @@ async def db_add_message(s_message_data, d_message_object, source="slack"):
     print(s_message_data)
     print(s_message_data)
     messages_insert_statement = f"""
-    INSERT INTO messages(message_text, slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id)
-    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages(slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id)
+    VALUES(?, ?, ?, ?, ?, ?, ?)
     """
     try:
         slack_thread_ts = s_message_data["slack_thread_ts"]
@@ -103,9 +102,9 @@ async def db_add_message(s_message_data, d_message_object, source="slack"):
         cursor = conn.cursor()
         if source == "slack":
             d_message_object.author.id = 0
-            cursor.execute(messages_insert_statement, (s_message_data["text"], s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], 0))
+            cursor.execute(messages_insert_statement, (s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], 0))
         elif source == "discord":
-            cursor.execute(messages_insert_statement, (s_message_data["message"]["text"], s_message_data["message"]["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, "no", d_message_object.author.id))
+            cursor.execute(messages_insert_statement, (s_message_data["message"]["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, "no", d_message_object.author.id))
         conn.commit()
 
 async def refresh_channel_cache_file():
@@ -155,7 +154,7 @@ async def slack_channel_to_discord_channel(slack_channel_id):
         if discord_channel == None:
             return None
         dc_to_sc[str(discord_channel.id)] = slack_channel_id
-        refresh_channel_cache_file()
+        await refresh_channel_cache_file()
         return discord_channel.id
 
 async def discord_channel_to_slack_channel(discord_channel_id):
@@ -174,7 +173,7 @@ async def discord_channel_to_slack_channel(discord_channel_id):
         if slack_channel_id == None:
             return None
         dc_to_sc[str(discord_channel_id)] = slack_channel_id
-        refresh_channel_cache_file()
+        await refresh_channel_cache_file()
         return slack_channel_id
 
 async def send_with_webhook(discord_channel_id, message, username, avatar_url):
@@ -350,6 +349,7 @@ async def start_main():
 #asyncio.run((await AsyncSocketModeHandler(sapp, open("slack_bot_token", "r").read()).start_async()))
 #slack_thread.start()
 
+try_setup_sql_first_time()
 threading.Thread(target=asyncio.run, args=(start_main(),)).start()
 
 intents = discord.Intents.all()
