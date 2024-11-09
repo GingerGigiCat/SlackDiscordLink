@@ -17,9 +17,6 @@ import functools
 import sqlite3
 
 
-print("REMEMBER TO START NGROK")
-
-
 dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 discord_server_id = 1301317329333784668
 main_discord_server_object = None
