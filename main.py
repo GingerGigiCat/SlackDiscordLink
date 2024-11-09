@@ -317,6 +317,10 @@ async def on_message(message): # Discord message listening, send to slack
 
 @dbot.event
 async def on_message_delete(message):
+    if message.author == dbot.user:
+        return
+    elif message.webhook_id != None: # Don't repost messages from the webhook
+        return
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (message.id,))
@@ -328,6 +332,10 @@ async def on_message_delete(message):
 
 @dbot.event
 async def on_message_edit(ogmessage, newmessage):
+    if newmessage.author == dbot.user:
+        return
+    elif newmessage.webhook_id != None: # Don't repost messages from the webhook
+        return
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (newmessage.id,))
