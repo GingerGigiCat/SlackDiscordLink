@@ -7,7 +7,7 @@
 
 Well suffer no longer.
 
-This is very much in development, so not everything works and it's not being hosted yet so it'll only be running when I'm running it for now.
+This is in development, so not everything works but it is being hosted on nest.
 
 It was able to access any channel, but I had to restrict it due to issues with moderating it. I would like to add full moderation support and slack account linking in the future, but right now it has to be restricted.
 
