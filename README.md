@@ -12,3 +12,7 @@ This is very much in development, so not everything works and it's not being hos
 It was able to access any channel, but I had to restrict it due to issues with moderating it. I would like to add full moderation support and slack account linking in the future, but right now it has to be restricted.
 
 Therefore, at the moment it can **only access [#hackclub-discord-bridge-management](https://hackclub.slack.com/archives/C07V1V34W48)**
+
+<video controls>
+<source src="https://cloud-j8ezy8jtg-hack-club-bot.vercel.app/0real_slackdiscordbridge_demo.mp4" type="video/mp4">
+</video>
