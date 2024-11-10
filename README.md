@@ -1,6 +1,6 @@
 # Chat between Slack and Discord
 
-## If you're in hack club and looking for a live demo, either join [https://discord.gg/bm5VDG3bc4](https://discord.gg/bm5VDG3bc4) and [#hackclub-discord-bridge-management](https://hackclub.slack.com/archives/C07V1V34W48), or scroll down to sea (pun intended) a video of it working
+## If you're in hack club and looking for a live demo, either join [https://discord.gg/bm5VDG3bc4](https://discord.gg/bm5VDG3bc4) and [#hackclub-discord-bridge-management](https://hackclub.slack.com/archives/C07V1V34W48), or press the demo button to sea (pun intended) a video of it working
 
 
 **Have you ever felt disappointed or confused by having to use slack? <p></p> Annoyed by another app open using up your RAM and your precious screen real estate? <p></p>**
@@ -13,6 +13,3 @@ It was able to access any channel, but I had to restrict it due to issues with m
 
 Therefore, at the moment it can **only access [#hackclub-discord-bridge-management](https://hackclub.slack.com/archives/C07V1V34W48)**
 
-<video controls>
-<source src="https://cloud-j8ezy8jtg-hack-club-bot.vercel.app/0real_slackdiscordbridge_demo.mp4" type="video/mp4">
-</video>
