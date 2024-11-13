@@ -88,8 +88,6 @@ def try_setup_sql_first_time():
         print("Failed to create tables:", e)
 
 async def db_add_message(s_message_data, d_message_object, source="slack"):
-    print(s_message_data)
-    print(s_message_data)
     messages_insert_statement = f"""
     INSERT INTO messages(slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id)
     VALUES(?, ?, ?, ?, ?, ?, ?)
@@ -220,18 +218,22 @@ async def handle_message(event, say, ack):
     await ack()
     message = event
     sclient = sapp.client
+    #print(message)
 
     #await say(":)")
     try:
         user_info = (await sclient.users_info(user=message["user"]))["user"]
-        display_name = user_info["profile"]["display_name"]
+        if user_info["profile"]["display_name"]:
+            display_name = user_info["profile"]["display_name"]
+        else:
+            display_name = user_info["profile"]["real_name"]
         try:
             avatar_url = user_info["profile"]["image_original"]
         except KeyError:
             avatar_url = user_info["profile"]["image_512"]
     except BoltError as e:
         print(f"Error getting user profile info: {e}")
-        display_name = "Anon"
+        display_name = "Unknown User"
         avatar_url = "https://cloud-mixfq3elm-hack-club-bot.vercel.app/0____.png"
     discord_channel = await slack_channel_to_discord_channel(message["channel"])
     if discord_channel is None:
