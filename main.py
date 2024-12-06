@@ -70,9 +70,27 @@ def try_setup_sql_first_time():
         slack_channel_id TEXT NOT NULL,
         discord_channel_id INT NOT NULL,
         is_thread INT NOT NULL,
-        slack_thread_ts TEXT NOT NULL,
+        slack_thread_ts TEXT,
         send_to_slack_allowed INT NOT NULL,
-        communicate_allowed INT NOT NULL
+        send_to_discord_allowed INT NOT NULL
+    )
+    """
+
+    members_table_statement = """
+    CREATE TABLE IF NOT EXISTS members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+        slack_user_id TEXT NOT NULL,
+        discord_user_id INT NOT NULL,
+        slack_pfp_url TEXT,
+        discord_pfp_url TEXT,
+        slack_display_name TEXT NOT NULL,
+        discord_display_name TEXT NOT NULL,
+        discord_username TEXT NOT NULL,
+        slack_token TEXT,
+        is_authorised INT NOT NULL,
+        send_to_slack_allowed INT NOT NULL,
+        banned INT NOT NULL
     )
     """
 
@@ -81,6 +99,7 @@ def try_setup_sql_first_time():
             cursor = conn.cursor()
             cursor.execute(messages_table_statement) # Create the table of messages if it doesn't exist
             cursor.execute(channels_table_statement) # Create the table of channels if it doesn't exist
+            cursor.execute(members_table_statement) # Create it for members
 
             conn.commit()
             print("Yay made the tables")
