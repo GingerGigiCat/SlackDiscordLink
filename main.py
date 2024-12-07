@@ -5,6 +5,7 @@ from discord.ext import commands
 #from slackeventsapi import SlackEventAdapter
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
 from slack_bolt.error import *
 
 
@@ -21,11 +22,23 @@ dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 discord_server_id = 1301317329333784668
 main_discord_server_object = None
 allowed_mentions = discord.AllowedMentions(roles=False, everyone=False)
-allowed_channels = ["hackclub-discord-bridge-management"] # Blank means all channel are allowed, this had to be added because of hack club things
+allowed_channels = ["hackclub-discord-bridge-management", "bot-spam"] # Blank means all channel are allowed, this had to be added because of hack club things
 
 with open("slack_bot_token", "r") as token_f:
     with open("slack_signing_secret", "r") as signing_secret_f:
-        sapp = AsyncApp(token=token_f.read(), signing_secret=signing_secret_f.read())
+        with open("slack_signing_secret", "r") as client_id_f:
+            with open("slack_client_secret", "r") as client_secret_f:
+                sapp = AsyncApp(token=token_f.read(), signing_secret=signing_secret_f.read(),
+                                oauth_settings = AsyncOAuthSettings(
+                                    client_id=client_id_f.read(),
+                                    client_secret=client_secret_f.read(),
+                                    redirect_uri="https://humane-bear-meet.ngrok-free.app/slack/oauth_redirect",
+                                    scopes=["openid", "profile", "users.profile:read"]
+                                )
+                )
+
+
+
 
 #sclient = WebClient(token=open("slack_bot_token", "r").read())
 #SLACK_SIGNING_SECRET = open("slack_signing_secret", "r").read()
@@ -303,6 +316,9 @@ async def handle_slack_message_edit(event, say, ack):
         except discord.errors.NotFound as e:
             print(e)
         conn.close()
+
+# An attempt at oauth
+
 
 
 
