@@ -5,8 +5,15 @@ from discord.ext import commands
 #from slackeventsapi import SlackEventAdapter
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
 from slack_bolt.error import *
+
+from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
+from slack_sdk.oauth import AuthorizeUrlGenerator
+from flask import Flask, request, make_response
+from slack_sdk.web.async_client import AsyncWebClient
+from slack_bolt.authorization import AuthorizeResult
+from slack_sdk.oauth.installation_store import FileInstallationStore, Installation
+from slack_sdk.oauth.state_store import FileOAuthStateStore
 
 
 import json
@@ -18,26 +25,57 @@ import functools
 import sqlite3
 
 
+with open("domain_name", "r") as f:
+    domain_name = f.read()
+oauth_state_store = FileOAuthStateStore(expiration_seconds=600, base_dir="./oauth_data")
+installation_store = FileInstallationStore(base_dir="./oauth_data")
+
 dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 discord_server_id = 1301317329333784668
 main_discord_server_object = None
 allowed_mentions = discord.AllowedMentions(roles=False, everyone=False)
 allowed_channels = ["hackclub-discord-bridge-management", "bot-spam"] # Blank means all channel are allowed, this had to be added because of hack club things
 
+
 with open("slack_bot_token", "r") as token_f:
     with open("slack_signing_secret", "r") as signing_secret_f:
-        with open("slack_signing_secret", "r") as client_id_f:
+        with open("slack_client_id", "r") as client_id_f:
             with open("slack_client_secret", "r") as client_secret_f:
-                sapp = AsyncApp(token=token_f.read(), signing_secret=signing_secret_f.read(),
-                                oauth_settings = AsyncOAuthSettings(
-                                    client_id=client_id_f.read(),
-                                    client_secret=client_secret_f.read(),
-                                    redirect_uri="https://humane-bear-meet.ngrok-free.app/slack/oauth_redirect",
-                                    scopes=["openid", "profile", "users.profile:read"]
-                                )
+                sapp = AsyncApp(signing_secret=signing_secret_f.read(),
+                                token=token_f.read())
+
+                flask_app = Flask(__name__)
+                client_secret = client_secret_f.read()
+
+                authorise_url_generator = AuthorizeUrlGenerator(
+                    client_id=client_id_f.read(),
+                    user_scopes=["openid", "profile"]
                 )
 
+#authorise_url_generator.generate()
+@sapp.event("callback")
+async def on_oauth_callback(what):
+    print(what)
 
+def get_oauth_url(discord_user_obj: discord.User = None):
+    state = oauth_state_store.issue()
+    url = authorise_url_generator.generate(state)
+
+    try:
+        with sqlite3.connect("main.db") as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            INSERT INTO members(discord)
+            """)
+    except sqlite3.OperationalError as e:
+        print(e)
+
+    return url
+
+
+
+
+print(get_oauth_url())
 
 
 #sclient = WebClient(token=open("slack_bot_token", "r").read())
@@ -101,6 +139,7 @@ def try_setup_sql_first_time():
         discord_display_name TEXT NOT NULL,
         discord_username TEXT NOT NULL,
         slack_token TEXT,
+        state_temp TEXT,
         is_authorised INT NOT NULL,
         send_to_slack_allowed INT NOT NULL,
         banned INT NOT NULL
@@ -196,7 +235,7 @@ async def discord_channel_to_slack_channel(discord_channel_id):
         discord_channel = get_discord_channel_object_from_id(discord_channel_id)
         if discord_channel == None:
             return
-        discord_chan_name = discord_channel.name
+        discord_chan_name = discord_channel.name()
         if not (allowed_channels == None or discord_chan_name in allowed_channels):
             return
         slack_channel_id = get_slack_channel_id(discord_chan_name)
@@ -318,7 +357,6 @@ async def handle_slack_message_edit(event, say, ack):
         conn.close()
 
 # An attempt at oauth
-
 
 
 
