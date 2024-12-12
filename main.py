@@ -65,12 +65,18 @@ def get_oauth_url(discord_user_obj: discord.User = None):
         with sqlite3.connect("main.db") as conn:
             cur = conn.cursor()
             cur.execute("""
-            INSERT INTO members(discord)
-            """)
+            INSERT INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, is_banned)
+            values(?, ?, ?, ?, ?, ?, ?, ?)
+            """, (discord_user_obj.id, discord_user_obj.avatar, discord_user_obj.display_name, discord_user_obj.global_name, state, 0, 0, 0))
     except sqlite3.OperationalError as e:
         print(e)
 
     return url
+
+@flask_app.route("/slac/oauth/callback", methods=["GET"])
+def oauth_callback():
+    if "code" in request.args:
+        if state_store.consume(request.args["code"]):
 
 
 
