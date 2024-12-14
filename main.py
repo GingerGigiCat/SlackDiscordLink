@@ -17,12 +17,18 @@ from slack_sdk.oauth.state_store import FileOAuthStateStore
 
 
 import json
+import time
 import os
 import threading
 import asyncio
 import concurrent.futures
 import functools
 import sqlite3
+
+from apscheduler.schedulers.blocking import BlockingScheduler
+
+scheduler = BlockingScheduler()
+
 
 
 with open("domain_name", "r") as f:
@@ -41,14 +47,15 @@ with open("slack_bot_token", "r") as token_f:
     with open("slack_signing_secret", "r") as signing_secret_f:
         with open("slack_client_id", "r") as client_id_f:
             with open("slack_client_secret", "r") as client_secret_f:
+                slack_client_id = client_id_f.read()
+                slack_client_secret = client_secret_f.read()
                 sapp = AsyncApp(signing_secret=signing_secret_f.read(),
                                 token=token_f.read())
 
                 flask_app = Flask(__name__)
-                client_secret = client_secret_f.read()
 
                 authorise_url_generator = AuthorizeUrlGenerator(
-                    client_id=client_id_f.read(),
+                    client_id=slack_client_id,
                     user_scopes=["openid", "profile"]
                 )
 
@@ -57,7 +64,7 @@ with open("slack_bot_token", "r") as token_f:
 async def on_oauth_callback(what):
     print(what)
 
-def get_oauth_url(discord_user_obj: discord.User = None):
+async def get_oauth_url(discord_user_obj: discord.User = None):
     state = oauth_state_store.issue()
     url = authorise_url_generator.generate(state)
 
@@ -65,23 +72,46 @@ def get_oauth_url(discord_user_obj: discord.User = None):
         with sqlite3.connect("main.db") as conn:
             cur = conn.cursor()
             cur.execute("""
-            INSERT INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, is_banned)
+            INSERT INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, banned)
             values(?, ?, ?, ?, ?, ?, ?, ?)
-            """, (discord_user_obj.id, discord_user_obj.avatar, discord_user_obj.display_name, discord_user_obj.global_name, state, 0, 0, 0))
+            """, (discord_user_obj.id, discord_user_obj.avatar.url, discord_user_obj.display_name, discord_user_obj.global_name, state, 0, 0, 0))
     except sqlite3.OperationalError as e:
         print(e)
 
     return url
 
-@flask_app.route("/slac/oauth/callback", methods=["GET"])
-def oauth_callback():
+@flask_app.route("/slack/oauth/callback", methods=["GET"])
+async def oauth_callback():
     if "code" in request.args:
-        if state_store.consume(request.args["code"]):
+        if oauth_state_store.consume(request.args["state"]):
+            client = AsyncWebClient()
+
+            oauth_response = await client.oauth_v2_access(
+                client_id=slack_client_id,
+                client_secret=slack_client_secret,
+                #redirect_uri=f"https://{domain_name}", # I don't know this may be wrong so if there's problems then maybe blame this line
+                code=request.args["code"]
+            )
+            installed_enterprise = oauth_response.get("enterprise") or {}
+            is_enterprise_install = oauth_response.get("is_enterprise_install")
+            installed_team = oauth_response.get("team") or {}
+            installer = oauth_response.get("authed_user") or {}
+            incoming_webhook = oauth_response.get("incoming_webhook") or {}
+            bot_token = oauth_response.get("access_token")
+            bot_id = None
+            enterprise_url = None
+
+            if bot_token is not None:
+                auth_test = await client.auth_test(token=bot_token)
+                bot_id = auth_test["bot_id"]
+                if is_enterprise_install:
+                    enterprise_url = await auth_test.get("url")
+            print("woah")
+    print("huh")
+    return "Thanks for installing this app!"
 
 
-
-
-print(get_oauth_url())
+#print(get_oauth_url())
 
 
 #sclient = WebClient(token=open("slack_bot_token", "r").read())
@@ -137,18 +167,19 @@ def try_setup_sql_first_time():
     CREATE TABLE IF NOT EXISTS members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-        slack_user_id TEXT NOT NULL,
-        discord_user_id INT NOT NULL,
+        slack_user_id TEXT,
+        discord_user_id INT,
         slack_pfp_url TEXT,
         discord_pfp_url TEXT,
-        slack_display_name TEXT NOT NULL,
-        discord_display_name TEXT NOT NULL,
-        discord_username TEXT NOT NULL,
+        slack_display_name TEXT,
+        discord_display_name TEXT,
+        discord_username TEXT,
         slack_token TEXT,
         state_temp TEXT,
         is_authorised INT NOT NULL,
         send_to_slack_allowed INT NOT NULL,
-        banned INT NOT NULL
+        banned INT NOT NULL,
+        constraint chk_null check (slack_display_name is not null or discord_username is not null)
     )
     """
 
@@ -438,9 +469,17 @@ async def start_main():
 #asyncio.run((await AsyncSocketModeHandler(sapp, open("slack_bot_token", "r").read()).start_async()))
 #slack_thread.start()
 
-try_setup_sql_first_time()
-threading.Thread(target=asyncio.run, args=(start_main(),)).start()
-
 intents = discord.Intents.all()
 intents.message_content = True
-dbot.run(open("discord_token", "r").read())
+threading.Thread(target=dbot.run, args=(open("discord_token", "r").read(),)).start()
+time.sleep(2)
+asyncio.set_event_loop(dbot.loop)
+try_setup_sql_first_time()
+threading.Thread(target=asyncio.run, args=(start_main(),)).start()
+threading.Thread(target=flask_app.run, kwargs={"port": 3000}).start()
+print(asyncio.run(get_oauth_url(dbot.get_user(721745855207571627)),)) # generate an oauth url for my discord user
+
+
+
+scheduler.start() # DO NOT REMOVE THIS IT BREAKS EVERYTHING PYTHON IS WEIRD
+
