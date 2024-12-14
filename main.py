@@ -30,7 +30,9 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 scheduler = BlockingScheduler()
 
 
-
+person_to_complain_at_name = "Gigi Cat"
+person_to_complain_at_slack_id = "U07DHR6J57U"
+slack_url = "hackclub.slack.com"
 with open("domain_name", "r") as f:
     domain_name = f.read()
 oauth_state_store = FileOAuthStateStore(expiration_seconds=600, base_dir="./oauth_data")
@@ -72,9 +74,10 @@ async def get_oauth_url(discord_user_obj: discord.User = None):
         with sqlite3.connect("main.db") as conn:
             cur = conn.cursor()
             cur.execute("""
-            INSERT INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, banned)
+            REPLACE INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, banned)
             values(?, ?, ?, ?, ?, ?, ?, ?)
-            """, (discord_user_obj.id, discord_user_obj.avatar.url, discord_user_obj.display_name, discord_user_obj.global_name, state, 0, 0, 0))
+            """, (discord_user_obj.id, discord_user_obj.avatar.url, discord_user_obj.display_name, discord_user_obj.name, state, 0, 0, 0))
+            conn.commit()
     except sqlite3.OperationalError as e:
         print(e)
 
@@ -98,17 +101,46 @@ async def oauth_callback():
             installer = oauth_response.get("authed_user") or {}
             incoming_webhook = oauth_response.get("incoming_webhook") or {}
             bot_token = oauth_response.get("access_token")
+            user_token = installer.get("access_token")
             bot_id = None
+            user_id = installer.get("id")
+            display_name = installer.get("display_name")
+            try:
+                user_pfp = installer.get("image_original")
+            except KeyError:
+                user_pfp = installer.get("image_512")
             enterprise_url = None
+            if installer.get("display_name"):
+                display_name = installer.get("display_name")
+            elif installer.get("real_name"):
+                display_name = installer.get("real_name")
 
             if bot_token is not None:
                 auth_test = await client.auth_test(token=bot_token)
                 bot_id = auth_test["bot_id"]
                 if is_enterprise_install:
                     enterprise_url = await auth_test.get("url")
+            try:
+                with sqlite3.connect("main.db") as conn:
+                    cur = conn.cursor()
+                    cur.execute("""
+                    UPDATE members
+                    SET slack_token = ?,
+                        state_temp = "",
+                        slack_user_id = ?,
+                        slack_display_name = ?,
+                        slack_pfp_url = ?
+                    WHERE state_temp = ?
+            
+                    """, (user_token, user_id, display_name, user_pfp, request.args["state"]))
+            except sqlite3.OperationalError as e:
+                print(f"Failed to put slack bits in the members database: {e}")
+                return f"<h1> Failed to access slack user database, please DM <a href=\"https://{slack_url}/team/{person_to_complain_at_slack_id}\">@{person_to_complain_at_name}</a></h1>"
             print("woah")
-    print("huh")
-    return "Thanks for installing this app!"
+            return "<h1> Yay you're authenticated!</h1>\n<h2> (You can close this tab now) </h2>"
+
+        else:
+            return "<h1> Uhhh it probably timed out so generate a new link and try again :)</h1>"
 
 
 #print(get_oauth_url())
@@ -168,7 +200,7 @@ def try_setup_sql_first_time():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
 
         slack_user_id TEXT,
-        discord_user_id INT,
+        discord_user_id INT UNIQUE,
         slack_pfp_url TEXT,
         discord_pfp_url TEXT,
         slack_display_name TEXT,
@@ -179,7 +211,7 @@ def try_setup_sql_first_time():
         is_authorised INT NOT NULL,
         send_to_slack_allowed INT NOT NULL,
         banned INT NOT NULL,
-        constraint chk_null check (slack_display_name is not null or discord_username is not null)
+        constraint chk_null check (slack_user_id is not null or discord_user_id is not null)
     )
     """
 
@@ -253,10 +285,10 @@ async def slack_channel_to_discord_channel(slack_channel_id):
     try: # Try get the id from a cache
         return sc_to_dc[str(slack_channel_id)]
     except KeyError:
-        slack_chan_name = get_slack_channel_name(slack_channel_id)
+        slack_chan_name = await get_slack_channel_name(slack_channel_id)
         if not (allowed_channels == None or slack_chan_name in allowed_channels):
             return None
-        discord_channel = get_discord_channel_object_from_name(slack_chan_name)
+        discord_channel = await get_discord_channel_object_from_name(slack_chan_name)
         if discord_channel == None:
             return None
         dc_to_sc[str(discord_channel.id)] = slack_channel_id
@@ -472,7 +504,7 @@ async def start_main():
 intents = discord.Intents.all()
 intents.message_content = True
 threading.Thread(target=dbot.run, args=(open("discord_token", "r").read(),)).start()
-time.sleep(2)
+time.sleep(4)
 asyncio.set_event_loop(dbot.loop)
 try_setup_sql_first_time()
 threading.Thread(target=asyncio.run, args=(start_main(),)).start()
