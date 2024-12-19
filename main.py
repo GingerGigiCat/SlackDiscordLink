@@ -58,7 +58,7 @@ with open("slack_bot_token", "r") as token_f:
 
                 authorise_url_generator = AuthorizeUrlGenerator(
                     client_id=slack_client_id,
-                    user_scopes=["openid", "profile"]
+                    user_scopes=["users.profile:read"]
                 )
 
 #authorise_url_generator.generate()
@@ -73,10 +73,11 @@ async def get_oauth_url(discord_user_obj: discord.User = None):
     try:
         with sqlite3.connect("main.db") as conn:
             cur = conn.cursor()
+            cur.execute("SELECT is_authorised, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_user_obj.id,))
             cur.execute("""
-            REPLACE INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, banned)
-            values(?, ?, ?, ?, ?, ?, ?, ?)
-            """, (discord_user_obj.id, discord_user_obj.avatar.url, discord_user_obj.display_name, discord_user_obj.name, state, 0, 0, 0))
+            REPLACE INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised)
+            values(?, ?, ?, ?, ?, ?)
+            """, (discord_user_obj.id, discord_user_obj.avatar.url, discord_user_obj.display_name, discord_user_obj.name, state, 0))
             conn.commit()
     except sqlite3.OperationalError as e:
         print(e)
@@ -104,16 +105,17 @@ async def oauth_callback():
             user_token = installer.get("access_token")
             bot_id = None
             user_id = installer.get("id")
-            display_name = installer.get("display_name")
+            profile = (await sapp.client.users_profile_get(token=user_token))["profile"]
+            print(profile)
             try:
-                user_pfp = installer.get("image_original")
+                user_pfp = profile["image_original"]
             except KeyError:
-                user_pfp = installer.get("image_512")
+                user_pfp = profile["image_512"]
             enterprise_url = None
-            if installer.get("display_name"):
-                display_name = installer.get("display_name")
-            elif installer.get("real_name"):
-                display_name = installer.get("real_name")
+            try:
+                display_name = profile["display_name"]
+            except KeyError:
+                display_name = profile["real_name"]
 
             if bot_token is not None:
                 auth_test = await client.auth_test(token=bot_token)
@@ -129,7 +131,8 @@ async def oauth_callback():
                         state_temp = "",
                         slack_user_id = ?,
                         slack_display_name = ?,
-                        slack_pfp_url = ?
+                        slack_pfp_url = ?,
+                        is_authorised = 1
                     WHERE state_temp = ?
             
                     """, (user_token, user_id, display_name, user_pfp, request.args["state"]))
@@ -209,8 +212,8 @@ def try_setup_sql_first_time():
         slack_token TEXT,
         state_temp TEXT,
         is_authorised INT NOT NULL,
-        send_to_slack_allowed INT NOT NULL,
-        banned INT NOT NULL,
+        send_to_slack_allowed,
+        banned INT,
         constraint chk_null check (slack_user_id is not null or discord_user_id is not null)
     )
     """
@@ -427,8 +430,18 @@ async def handle_slack_message_edit(event, say, ack):
 
 # An attempt at oauth
 
-
-
+async def check_user(message: discord.Message = None, discord_author_id = None): # Function to check if a user is allowed to send a message from discord to slack, given a discord message object
+    try:
+        discord_author_id = message.author.id
+    except:
+        pass
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT slack_pfp_url, slack_display_name, slack_token, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_author_id,))
+        slack_pfp_url, slack_display_name, slack_token, send_to_slack_allowed, banned = cur.fetchone()
+        if send_to_slack_allowed and banned != 1:
+            token_test = await sapp.client.auth_test(token=slack_token)
+            print(token_test)
 
 @dbot.event
 async def on_ready():
@@ -509,7 +522,8 @@ asyncio.set_event_loop(dbot.loop)
 try_setup_sql_first_time()
 threading.Thread(target=asyncio.run, args=(start_main(),)).start()
 threading.Thread(target=flask_app.run, kwargs={"port": 3000}).start()
-print(asyncio.run(get_oauth_url(dbot.get_user(721745855207571627)),)) # generate an oauth url for my discord user
+#print(asyncio.run(get_oauth_url(dbot.get_user(721745855207571627)),)) # generate an oauth url for my discord user
+print(asyncio.run(check_user(discord_author_id=721745855207571627)))
 
 
 
