@@ -74,10 +74,11 @@ async def get_oauth_url(discord_user_obj: discord.User = None):
         with sqlite3.connect("main.db") as conn:
             cur = conn.cursor()
             cur.execute("SELECT is_authorised, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_user_obj.id,))
+            is_authorised, send_to_slack_allowed, banned = cur.fetchone()
             cur.execute("""
-            REPLACE INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised)
-            values(?, ?, ?, ?, ?, ?)
-            """, (discord_user_obj.id, discord_user_obj.avatar.url, discord_user_obj.display_name, discord_user_obj.name, state, 0))
+            REPLACE INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, banned)
+            values(?, ?, ?, ?, ?, ?, ? , ?)
+            """, (discord_user_obj.id, discord_user_obj.avatar.url, discord_user_obj.display_name, discord_user_obj.name, state, 0, send_to_slack_allowed, banned))
             conn.commit()
     except sqlite3.OperationalError as e:
         print(e)
