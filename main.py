@@ -324,14 +324,14 @@ async def send_with_webhook(discord_channel_id, message, username, avatar_url):
     webhook = None
     if webhooks:
         for wh in webhooks:
-            print(wh)
+            #print(wh)
             if wh.user.id == dbot.user.id:
                 webhook = wh
                 break
     if not webhook:
         print(f"Creating new webhook in #{channel.name}")
         webhook = await channel.create_webhook(name="Slack Link")
-    print(f"Sending message to {webhook}: {message}, {username}, {avatar_url}")
+    #print(f"Sending message to {webhook}: {message}, {username}, {avatar_url}")
     return await webhook.send(content=message, username=username, avatar_url=avatar_url, wait=True, allowed_mentions=allowed_mentions)
 
 async def edit_with_webhook(discord_channel_id, message_id, text, thread=""):
@@ -429,20 +429,37 @@ async def handle_slack_message_edit(event, say, ack):
             print(e)
         conn.close()
 
-# An attempt at oauth
-
+# TODO: WORKING ON THIS
 async def check_user(message: discord.Message = None, discord_author_id = None): # Function to check if a user is allowed to send a message from discord to slack, given a discord message object
     try:
         discord_author_id = message.author.id
     except:
         pass
     with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT slack_pfp_url, slack_display_name, slack_token, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_author_id,))
-        slack_pfp_url, slack_display_name, slack_token, send_to_slack_allowed, banned = cur.fetchone()
-        if send_to_slack_allowed and banned != 1:
-            token_test = await sapp.client.auth_test(token=slack_token)
-            print(token_test)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT slack_pfp_url, slack_display_name, slack_token, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_author_id,))
+            fetched = cur.fetchone()
+            if fetched == None:
+                return "notindatabase"
+            slack_pfp_url, slack_display_name, slack_token, send_to_slack_allowed, banned = fetched
+            if send_to_slack_allowed != 0 and banned != 1:
+                token_test = await sapp.client.auth_test(token=slack_token)
+                if token_test["ok"] == True:
+                    return True
+                else:
+                    return token_test["error"]
+            else:
+                return "unallowed"
+        except Exception as e:
+            return e
+
+async def reply_to_author(message: discord.Message, the_text):
+    try:
+        await message.author.send(the_text)
+    except:
+        await message.reply(the_text)
+
 
 @dbot.event
 async def on_ready():
@@ -466,6 +483,18 @@ async def on_message(message): # Discord message listening, send to slack
         slack_channel_id = await discord_channel_to_slack_channel(message.channel.id)
         #print(2)
         if slack_channel_id == None:
+            return
+        check_result = await check_user(message)
+        if check_result != True:
+            if check_result == "unallowed":
+                await reply_to_author(message, "Looks like you're banned or muted, if you think this is a mistake, contact the moderation team or ask in #hackclub-discord-bridge-management in slack or discord, or #purgatory in discord")
+            elif check_result in ["token_revoked", "not_authed", "token_expired", "token_revoked"]:
+                await reply_to_author(message, f"Hmmm you might need to authenticate yourself again, try running /auth in the discord server.\nDebug message: {check_result}")
+            elif check_result == "notindatabase":
+                await reply_to_author(message, "Looks like you need to authenticate with slack! Run **/auth** in the bridge discord server to get started.")
+            else:
+                print(check_result)
+                await reply_to_author(message, f"Hmmm something went very wrong, maybe you need to reverify? Try running /auth in the discord server, and complain at [@{person_to_complain_at_name}](https://{slack_url}/team/{person_to_complain_at_slack_id}) and give them {check_result}")
             return
         try:
             s_message = await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
