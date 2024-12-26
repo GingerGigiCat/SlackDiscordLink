@@ -454,6 +454,27 @@ async def check_user(message: discord.Message = None, discord_author_id = None):
         except Exception as e:
             return e
 
+
+async def do_the_whole_user_check(message: discord.Message):
+    check_result = await check_user(message)
+    if check_result != True:
+        if check_result == "unallowed":
+            await reply_to_author(message,
+                                  "Looks like you're banned or muted, if you think this is a mistake, cont```````````````````````````````````````act the moderation team or ask in #hackclub-discord-bridge-management in slack or discord, or #purgatory in discord")
+        elif check_result in ["token_revoked", "not_authed", "token_expired", "token_revoked"]:
+            await reply_to_author(message,
+                                  f"Hmmm you might need to authenticate yourself again, try running /auth in the discord server.\nDebug message: {check_result}")
+        elif check_result == "notindatabase":
+            await reply_to_author(message,
+                                  "Looks like you need to authenticate with slack! Run **/auth** in the bridge discord server to get started.")
+        else:
+            print(check_result)
+            await reply_to_author(message,
+                                  f"Hmmm something went very wrong, maybe you need to reverify? Try running /auth in the discord server, and complain at [@{person_to_complain_at_name}](https://{slack_url}/team/{person_to_complain_at_slack_id}) and give them {check_result}")
+        return check_result
+    else:
+        return True
+
 async def reply_to_author(message: discord.Message, the_text):
     try:
         await message.author.send(the_text)
@@ -484,17 +505,9 @@ async def on_message(message): # Discord message listening, send to slack
         #print(2)
         if slack_channel_id == None:
             return
-        check_result = await check_user(message)
-        if check_result != True:
-            if check_result == "unallowed":
-                await reply_to_author(message, "Looks like you're banned or muted, if you think this is a mistake, contact the moderation team or ask in #hackclub-discord-bridge-management in slack or discord, or #purgatory in discord")
-            elif check_result in ["token_revoked", "not_authed", "token_expired", "token_revoked"]:
-                await reply_to_author(message, f"Hmmm you might need to authenticate yourself again, try running /auth in the discord server.\nDebug message: {check_result}")
-            elif check_result == "notindatabase":
-                await reply_to_author(message, "Looks like you need to authenticate with slack! Run **/auth** in the bridge discord server to get started.")
-            else:
-                print(check_result)
-                await reply_to_author(message, f"Hmmm something went very wrong, maybe you need to reverify? Try running /auth in the discord server, and complain at [@{person_to_complain_at_name}](https://{slack_url}/team/{person_to_complain_at_slack_id}) and give them {check_result}")
+        if await do_the_whole_user_check(message) == True:
+            pass
+        else:
             return
         try:
             s_message = await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
@@ -507,6 +520,10 @@ async def on_message_delete(message):
     if message.author == dbot.user:
         return
     elif message.webhook_id != None: # Don't repost messages from the webhook
+        return
+    if await do_the_whole_user_check(message) == True:
+        pass
+    else:
         return
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
