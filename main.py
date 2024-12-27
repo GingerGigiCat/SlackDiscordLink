@@ -521,10 +521,7 @@ async def on_message_delete(message):
         return
     elif message.webhook_id != None: # Don't repost messages from the webhook
         return
-    if await do_the_whole_user_check(message) == True:
-        pass
-    else:
-        return
+
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (message.id,))
@@ -540,6 +537,11 @@ async def on_message_edit(ogmessage, newmessage):
         return
     elif newmessage.webhook_id != None: # Don't repost messages from the webhook
         return
+    if await do_the_whole_user_check(ogmessage) == True:
+        pass
+    else:
+        return
+
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (newmessage.id,))
