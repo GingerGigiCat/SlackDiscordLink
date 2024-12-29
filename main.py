@@ -24,6 +24,7 @@ import asyncio
 import concurrent.futures
 import functools
 import sqlite3
+import requests
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -219,12 +220,27 @@ def try_setup_sql_first_time():
     )
     """
 
+    emojis_table_statement = """
+    CREATE TABLE IF NOT EXISTS emojis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    
+    emoji_name TEXT UNIQUE,
+    discord_emoji_id_server INT,
+    discord_emoji_id_app INT,
+    slack_url TEXT,
+    is_in_discord_server INT,
+    is_in_bot_cache INT,
+    is_animated INT,
+    usages_count INT
+    )"""
+
     try:
         with sqlite3.connect(database_name) as conn:
             cursor = conn.cursor()
             cursor.execute(messages_table_statement) # Create the table of messages if it doesn't exist
             cursor.execute(channels_table_statement) # Create the table of channels if it doesn't exist
             cursor.execute(members_table_statement) # Create it for members
+            cursor.execute(emojis_table_statement) # Create table of emojis
 
             conn.commit()
             print("Yay made the tables")
@@ -351,6 +367,98 @@ async def edit_with_webhook(discord_channel_id, message_id, text, thread=""):
     return await webhook.edit_message(message_id=message_id, content=text, allowed_mentions=allowed_mentions)
 
 
+async def full_emoji_list_refresh():
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        emoji_list = await sapp.client.emoji_list()
+        #print(emoji_list)
+        if emoji_list["ok"] == True:
+            for key, value in emoji_list["emoji"].items():
+                #print(f"{key}: {value}")
+                if value[-3:].lower() == "gif":
+                    is_animated = True
+                else:
+                    is_animated = False
+                cur.execute("""
+                INSERT INTO emojis(emoji_name, slack_url, is_animated, usages_count)
+                values(?, ?, ?, ?)
+                ON CONFLICT(emoji_name) DO UPDATE SET 
+                slack_url=EXCLUDED.slack_url
+                """, (key, value, is_animated, 0))
+            conn.commit()
+            print("Emoji list database refreshed, now refreshing emojis in discord...")
+
+        # First upload emojis for the discord server so that a smaller number (50) of the most used emojis can be used by members
+        original_emoji_list = [] # A list of just the names of emojis currently in the server
+        for emoji in dbot.get_guild(discord_server_id).emojis:
+            original_emoji_list.append(emoji.name)
+
+        updated_emoji_list = [] # What the new list of emojis should be, each item being ["emoji_name", "emoji_slack_url", is_in_discord_server]
+        added_emoji_list = []
+
+
+        # Get a small number of animated emojis for nitro users
+        cur.execute("""
+        SELECT emoji_name, slack_url, is_in_discord_server, is_in_bot_cache, is_animated, usages_count FROM emojis
+        WHERE usages_count >= 2
+        ORDER BY usages_count DESC
+        """)
+        fetched = cur.fetchmany(6)
+
+        for db_emoji in fetched:
+            emoji_name, slack_url, is_in_discord_server, is_in_bot_cache, is_animated, usages_count = db_emoji
+            if is_in_discord_server != 1:
+                pass
+
+
+    """
+    emoji_name TEXT UNIQUE,
+    discord_emoji_id_server INT,
+    discord_emoji_id_app INT,
+    slack_url TEXT,
+    is_in_discord_server INT,
+    is_in_bot_cache INT,
+    is_animated INT,
+    usages_count INT
+                """
+
+
+
+
+async def convert_emoji(demoji: str = None, smoji: str = None, is_retry=False):
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        if demoji: emoji_name = demoji
+        elif smoji: emoji_name = smoji
+        else:
+            raise ValueError("No emoji name given")
+        cur.execute("""
+        SELECT slack_url, is_in_discord_server, is_in_bot_cache FROM emojis WHERE emoji_name=?
+        """, (emoji_name,))
+
+        retrieved = cur.fetchone()
+        if retrieved:
+            cur.execute("""
+            UPDATE emoji SET usages_count = usages_count + 1 WHERE emoji_name=?
+            """, (emoji_name,))
+            the_emoji_slack_url, is_in_discord_server, is_in_bot_cache = cur.fetchone()
+
+            print(retrieved) # DO SOMETHING
+        elif is_retry == False:
+            emoji_list = await sapp.client.emoji_list()
+            if emoji_list["ok"] == True:
+                try:
+                    cur.execute()
+                    cur.execute(emoji_list["emoji"][emoji_name])
+                except KeyError:
+                    print(f"Emoji {emoji_name} not found")
+                    await full_emoji_list_refresh()
+                    return convert_emoji(demoji=demoji, smoji=smoji, is_retry=True)
+
+
+
+
+    return
 
 @sapp.event("reaction_added")
 async def reaction_added(event, say):
@@ -572,7 +680,9 @@ try_setup_sql_first_time()
 threading.Thread(target=asyncio.run, args=(start_main(),)).start()
 threading.Thread(target=flask_app.run, kwargs={"port": 3000}).start()
 #print(asyncio.run(get_oauth_url(dbot.get_user(721745855207571627)),)) # generate an oauth url for my discord user
-print(asyncio.run(check_user(discord_author_id=721745855207571627)))
+#print(asyncio.run(check_user(discord_author_id=721745855207571627))) # Check a user
+#print(dbot.get_guild(783730602977001533).emojis[0].name)
+asyncio.run(full_emoji_list_refresh())
 
 
 
