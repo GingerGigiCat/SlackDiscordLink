@@ -25,6 +25,7 @@ import concurrent.futures
 import functools
 import sqlite3
 import requests
+import aiohttp
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -370,8 +371,9 @@ async def edit_with_webhook(discord_channel_id, message_id, text, thread=""):
 async def full_emoji_list_refresh():
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
+
+        # Get the full list of emojis from slack and update the database with it
         emoji_list = await sapp.client.emoji_list()
-        #print(emoji_list)
         if emoji_list["ok"] == True:
             for key, value in emoji_list["emoji"].items():
                 #print(f"{key}: {value}")
@@ -388,27 +390,104 @@ async def full_emoji_list_refresh():
             conn.commit()
             print("Emoji list database refreshed, now refreshing emojis in discord...")
 
-        # First upload emojis for the discord server so that a smaller number (50) of the most used emojis can be used by members
-        original_emoji_list = [] # A list of just the names of emojis currently in the server
-        for emoji in dbot.get_guild(discord_server_id).emojis:
-            original_emoji_list.append(emoji.name)
+        for i in range(2):
+            app = False
+            guild = False
+            if i == 0:
+                guild_or_app="guild"
+                guild = True
+            elif i == 1:
+                guild_or_app="app"
+                app = True
+            else:
+                raise ValueError("Something went very wrong in the for loop, i should only ever be 0 or 1")
 
-        updated_emoji_list = [] # What the new list of emojis should be, each item being ["emoji_name", "emoji_slack_url", is_in_discord_server]
-        added_emoji_list = []
+            original_emoji_list = [] # A list of emojis currently in the discord server, each item being ["emoji_name", emoji_id]
+            if guild:
+                basic_full_emoji_list_temp = dbot.get_guild(discord_server_id).emojis
+            else:
+                basic_full_emoji_list_temp = await dbot.fetch_application_emojis()
+            for emoji in basic_full_emoji_list_temp:
+                original_emoji_list.append([emoji.name, emoji.id])
 
+            updated_emoji_list = [] # What the new list of emojis should be, each item being ["emoji_name", "emoji_slack_url"]
+            added_emoji_list = [] # List of emojis to add
+            removed_emoji_list = [] # List of emojis to remove, in same formatting as original_emoji_list
 
-        # Get a small number of animated emojis for nitro users
-        cur.execute("""
-        SELECT emoji_name, slack_url, is_in_discord_server, is_in_bot_cache, is_animated, usages_count FROM emojis
-        WHERE usages_count >= 2
-        ORDER BY usages_count DESC
-        """)
-        fetched = cur.fetchmany(6)
+            # Get a small number of animated emojis for nitro users
+            if guild:
+                select_statement_temp = """
+                    SELECT emoji_name, slack_url, is_in_discord_server, is_animated, usages_count FROM emojis
+                    WHERE usages_count >= 2 AND is_animated = ?
+                    ORDER BY usages_count DESC
+                    """
+                loop_number = 2
+            else:
+                select_statement_temp = """
+                    SELECT emoji_name, slack_url, is_in_bot_cache, is_animated, usages_count FROM emojis
+                    WHERE usages_count >= 2
+                    ORDER BY usages_count DESC
+                    """
+                loop_number = 1
+            for i in range(loop_number):
+                if app: number_to_fetch = 1900
+                elif i == 0: number_to_fetch = 6
+                elif i == 1: number_to_fetch = 40
+                else: raise ValueError("For loop has gone wrong, i should only be 1 or 0")
 
-        for db_emoji in fetched:
-            emoji_name, slack_url, is_in_discord_server, is_in_bot_cache, is_animated, usages_count = db_emoji
-            if is_in_discord_server != 1:
-                pass
+                if guild: parameters_temp = (i,)
+                else: parameters_temp = ()
+                cur.execute(select_statement_temp, parameters_temp)
+                fetched = cur.fetchmany(number_to_fetch)
+                for db_emoji in fetched:
+                    emoji_name, slack_url, is_in_discord, is_animated, usages_count = db_emoji
+                    updated_emoji_list.append([emoji_name, slack_url])
+                    if is_in_discord != 1:
+                        added_emoji_list.append([emoji_name, slack_url])
+
+            updated_emoji_list_names = [item[0] for item in updated_emoji_list]
+            for emoji in original_emoji_list:
+                if emoji[0] not in updated_emoji_list_names:
+                    removed_emoji_list.append(emoji)
+
+            for emoji in removed_emoji_list:
+                await dbot.get_emoji(emoji[1]).delete()
+                if guild: column_to_change_temp = "is_in_discord_server"
+                else: column_to_change_temp = "is_in_bot_cache"
+                cur.execute(f"""
+                UPDATE emojis
+                SET {column_to_change_temp} = 0
+                WHERE emoji_name = ?
+                """, (emoji[0]))
+
+            async with aiohttp.ClientSession() as session:
+                if guild:
+                    emoji_create_method = dbot.get_guild(discord_server_id).create_custom_emoji
+                    emoji_id_column_to_change_temp = "discord_emoji_id_server"
+                    is_in_discord_column_to_change_temp = "is_in_discord_server"
+                else:
+                    emoji_create_method = dbot.create_application_emoji
+                    emoji_id_column_to_change_temp = "discord_emoji_id_app"
+                    is_in_discord_column_to_change_temp = "is_in_bot_cache"
+                for emoji in added_emoji_list:
+                    emoji_image_data = await (await session.get(emoji[1])).content.read()
+                    if guild:
+                        created_emoji = await emoji_create_method(name=emoji[0], image=emoji_image_data)
+                    elif app:
+                        created_emoji = await dbot.create_application_emoji(name=emoji[0], image=emoji_image_data)
+                    #print(created_emoji, created_emoji.id)
+                    #print(emoji[0])
+
+                    cur.execute(f"""
+                    UPDATE emojis
+                    SET {emoji_id_column_to_change_temp} = ?,
+                    {is_in_discord_column_to_change_temp} = 1
+                    WHERE emoji_name = ?
+                    """, (created_emoji.id, emoji[0]))
+                    #print("a")
+
+            print(f"Big emoji refresh done for discord {guild_or_app}! (maybe)")
+        conn.commit()
 
 
     """
@@ -682,7 +761,7 @@ threading.Thread(target=flask_app.run, kwargs={"port": 3000}).start()
 #print(asyncio.run(get_oauth_url(dbot.get_user(721745855207571627)),)) # generate an oauth url for my discord user
 #print(asyncio.run(check_user(discord_author_id=721745855207571627))) # Check a user
 #print(dbot.get_guild(783730602977001533).emojis[0].name)
-asyncio.run(full_emoji_list_refresh())
+asyncio.run_coroutine_threadsafe(full_emoji_list_refresh(), loop=dbot.loop)
 
 
 
