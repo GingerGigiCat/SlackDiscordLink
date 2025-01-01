@@ -48,6 +48,7 @@ oauth_state_store = FileOAuthStateStore(expiration_seconds=600, base_dir="./oaut
 installation_store = FileInstallationStore(base_dir="./oauth_data")
 
 dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
+bot_owner_discord_user_id = 721745855207571627
 discord_server_id = 1301317329333784668
 main_discord_server_object = None
 allowed_mentions = discord.AllowedMentions(roles=False, everyone=False)
@@ -93,6 +94,11 @@ async def get_oauth_url(discord_user_obj: discord.User = None): # TODO: Make dis
         print(e)
 
     return url
+
+@dbot.tree.command(name="auth", description="Get a link to log in with slack so that you can use the discord link.")
+async def oauth_discord_command(interaction:discord.Interaction):
+    await interaction.response.send_message(f"{await get_oauth_url(discord_user_obj=interaction.user)}", ephemeral=True)
+
 
 @flask_app.route("/slack/oauth/callback", methods=["GET"])
 async def oauth_callback():
@@ -155,7 +161,7 @@ async def oauth_callback():
         else:
             return "<h1> Uhhh it probably timed out so generate a new link and try again :)</h1>"
 
-
+#def html(text="hi")
 #print(get_oauth_url())
 
 
@@ -779,6 +785,11 @@ async def on_ready():
 async def on_message(message): # Discord message listening, send to slack
     sclient = sapp.client
     # don't respond to ourselves
+    if message.content.lower() == "sync commands aaaa" and message.author.id == bot_owner_discord_user_id:
+        await dbot.tree.sync()
+        await message.reply("Done!")
+        return
+
     if message.author == dbot.user:
         return
     elif message.webhook_id != None: # Don't repost messages from the webhook
@@ -900,8 +911,8 @@ asyncio.set_event_loop(dbot.loop)
 try_setup_sql_first_time()
 asyncio.run_coroutine_threadsafe(start_main(), loop=dbot.loop)
 threading.Thread(target=flask_app.run, kwargs={"port": 3000}).start()
-#print(asyncio.run(get_oauth_url(dbot.get_user(721745855207571627)),)) # generate an oauth url for my discord user
-#print(asyncio.run(check_user(discord_author_id=721745855207571627))) # Check a user
+#print(asyncio.run(get_oauth_url(dbot.get_user(bot_owner_discord_user_id)),)) # generate an oauth url for my discord user
+#print(asyncio.run(check_user(discord_author_id=bot_owner_discord_user_id))) # Check a user
 #print(dbot.get_guild(783730602977001533).emojis[0].name)
 asyncio.run_coroutine_threadsafe(full_emoji_list_refresh(), loop=dbot.loop)
 
