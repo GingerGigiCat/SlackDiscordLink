@@ -1,3 +1,4 @@
+# This is mainly Zeon's contribution, not mine
 
 def mdParse(content, is_slack):
     content = convertLinks(content, is_slack)

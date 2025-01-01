@@ -27,6 +27,8 @@ import sqlite3
 import requests
 import aiohttp
 
+import md
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 scheduler = BlockingScheduler()
@@ -603,8 +605,7 @@ async def handle_message(event, say, ack):
         print("Discord channel not found")
         return
 
-# TODO
-    sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(convert_emoji(smoji=message["text"]), dbot.loop)), username=display_name, avatar_url=avatar_url,
+    sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(handle_message_text_conversion(message["text"], True), dbot.loop)), username=display_name, avatar_url=avatar_url,
                           discord_channel_id=int(discord_channel)), dbot.loop))
 
     #sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
@@ -705,6 +706,42 @@ async def reply_to_author(message: discord.Message, the_text):
         await message.reply(the_text)
 
 
+async def handle_message_text_conversion(message_text:str, is_slack:bool):
+    message_text = md.mdParse(message_text, is_slack)
+
+    if is_slack:
+        start_char, end_char = ":", ":"
+    else:
+        start_char = "<"
+        end_char = ">"
+    substr_start_i = -1
+    substr_end_i = -1
+
+    while True:
+        substr_start_i = message_text.find(start_char, substr_end_i + 1)
+        if substr_start_i != -1:
+            substr_end_i = message_text.find(end_char, substr_start_i + 1)
+            if substr_end_i != -1:
+                emoji_text_original = message_text[substr_start_i: substr_end_i + 1]
+                if is_slack:
+                    emoji_text_converted = await convert_emoji(smoji=emoji_text_original)
+                else:
+                    emoji_text_converted = await convert_emoji(demoji=emoji_text_original)
+                #print(emoji_text_converted)
+                if emoji_text_converted == emoji_text_original:
+                    substr_end_i -= 1
+                #print(message_text)
+                #print(emoji_text_original, emoji_text_converted)
+                message_text = message_text.replace(emoji_text_original, emoji_text_converted)
+                #print(message_text)
+            else:
+                break
+        else:
+            break
+    #print()
+    return message_text
+
+
 @dbot.event
 async def on_ready():
     global main_discord_server_object
@@ -733,27 +770,9 @@ async def on_message(message): # Discord message listening, send to slack
         else:
             return
 
-        try: #TODO: It can't just stay like this, it needs to actually handle message text correctly, this is just for testing
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
-            #TODO
+        try:
             s_message = await sclient.chat_postMessage(channel=slack_channel_id,
-                                                       text=await convert_emoji(demoji=message.content),
+                                                       text=await handle_message_text_conversion(message.content, False),
                                                        username=message.author.display_name,
                                                        icon_url=message.author.avatar.url)
             #s_message = await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
