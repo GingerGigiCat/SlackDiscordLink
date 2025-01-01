@@ -68,7 +68,7 @@ with open("slack_bot_token", "r") as token_f:
 async def on_oauth_callback(what):
     print(what)
 
-async def get_oauth_url(discord_user_obj: discord.User = None):
+async def get_oauth_url(discord_user_obj: discord.User = None): # TODO: Make discord slash command to verify
     state = oauth_state_store.issue()
     url = authorise_url_generator.generate(state)
 
@@ -368,27 +368,35 @@ async def edit_with_webhook(discord_channel_id, message_id, text, thread=""):
     return await webhook.edit_message(message_id=message_id, content=text, allowed_mentions=allowed_mentions)
 
 
-async def full_emoji_list_refresh():
+async def full_emoji_list_refresh(slack_emoji_list=None, target_emoji_name="", refresh_list=True):
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
 
         # Get the full list of emojis from slack and update the database with it
-        emoji_list = await sapp.client.emoji_list()
-        if emoji_list["ok"] == True:
-            for key, value in emoji_list["emoji"].items():
-                #print(f"{key}: {value}")
-                if value[-3:].lower() == "gif":
-                    is_animated = True
-                else:
-                    is_animated = False
-                cur.execute("""
-                INSERT INTO emojis(emoji_name, slack_url, is_animated, usages_count)
-                values(?, ?, ?, ?)
-                ON CONFLICT(emoji_name) DO UPDATE SET 
-                slack_url=EXCLUDED.slack_url
-                """, (key, value, is_animated, 0))
-            conn.commit()
-            print("Emoji list database refreshed, now refreshing emojis in discord...")
+        if refresh_list:
+            if slack_emoji_list:
+                emoji_list = slack_emoji_list
+            else:
+                emoji_list = await sapp.client.emoji_list()
+            if emoji_list["ok"] == True:
+                for key, value in emoji_list["emoji"].items():
+                    #print(f"{key}: {value}")
+                    if value[-3:].lower() == "gif":
+                        is_animated = True
+                    else:
+                        is_animated = False
+                    if key == target_emoji_name:
+                        usages_count = 1
+                    else:
+                        usages_count = 0
+                    cur.execute("""
+                    INSERT INTO emojis(emoji_name, slack_url, is_animated, usages_count)
+                    values(?, ?, ?, ?)
+                    ON CONFLICT(emoji_name) DO UPDATE SET 
+                    slack_url=EXCLUDED.slack_url
+                    """, (key, value, is_animated, usages_count))
+                conn.commit()
+                print("Emoji list database refreshed, now refreshing emojis in discord...")
 
         for i in range(2):
             app = False
@@ -418,14 +426,14 @@ async def full_emoji_list_refresh():
             if guild:
                 select_statement_temp = """
                     SELECT emoji_name, slack_url, is_in_discord_server, is_animated, usages_count FROM emojis
-                    WHERE usages_count >= 2 AND is_animated = ?
+                    WHERE usages_count >= 1 AND is_animated = ?
                     ORDER BY usages_count DESC
                     """
                 loop_number = 2
             else:
                 select_statement_temp = """
                     SELECT emoji_name, slack_url, is_in_bot_cache, is_animated, usages_count FROM emojis
-                    WHERE usages_count >= 2
+                    WHERE usages_count >= 1
                     ORDER BY usages_count DESC
                     """
                 loop_number = 1
@@ -489,7 +497,7 @@ async def full_emoji_list_refresh():
             print(f"Big emoji refresh done for discord {guild_or_app}! (maybe)")
         conn.commit()
 
-
+    # Emoji db format
     """
     emoji_name TEXT UNIQUE,
     discord_emoji_id_server INT,
@@ -501,43 +509,67 @@ async def full_emoji_list_refresh():
     usages_count INT
                 """
 
-
-
-
 async def convert_emoji(demoji: str = None, smoji: str = None, is_retry=False):
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
-        if demoji: emoji_name = demoji
-        elif smoji: emoji_name = smoji
-        else:
-            raise ValueError("No emoji name given")
+        if demoji: emoji_in = demoji
+        elif smoji: emoji_in = smoji
+        else: raise ValueError("No emoji text given")
+
+        first_colon_index = emoji_in.find(":")
+        if first_colon_index == -1:
+            return emoji_in
+        second_colon_index = emoji_in.find(":", first_colon_index +1)
+        if second_colon_index == -1:
+            return emoji_in
+        emoji_name = emoji_in[first_colon_index+1 : second_colon_index]
+
         cur.execute("""
-        SELECT slack_url, is_in_discord_server, is_in_bot_cache FROM emojis WHERE emoji_name=?
+        SELECT discord_emoji_id_server, discord_emoji_id_app, is_in_discord_server, is_in_bot_cache, is_animated FROM emojis WHERE emoji_name=?
         """, (emoji_name,))
 
         retrieved = cur.fetchone()
         if retrieved:
-            cur.execute("""
-            UPDATE emoji SET usages_count = usages_count + 1 WHERE emoji_name=?
-            """, (emoji_name,))
-            the_emoji_slack_url, is_in_discord_server, is_in_bot_cache = cur.fetchone()
+            if not is_retry:
+                cur.execute("""
+                UPDATE emojis SET usages_count = usages_count + 1 WHERE emoji_name=?
+                """, (emoji_name,))
+                conn.commit()
+            discord_emoji_id_server, discord_emoji_id_app, is_in_discord_server, is_in_bot_cache, is_animated = retrieved
 
-            print(retrieved) # DO SOMETHING
+            if demoji:
+                return f":{emoji_name}:"
+            elif smoji:
+                if is_animated:
+                    prefix_temp = "a"
+                else:
+                    prefix_temp = ""
+                if is_in_discord_server:
+                    emoji_id = discord_emoji_id_server
+                    return f"<{prefix_temp}:{emoji_name}:{emoji_id}>"
+                elif is_in_bot_cache:
+                    emoji_id = discord_emoji_id_app
+                    return f"<{prefix_temp}:{emoji_name}:{emoji_id}>"
+                else:
+                    cur.execute("""
+                    SELECT emoji_name, is_in_discord_server, is_in_bot_cache, is_animated, usages_count FROM emojis
+                    WHERE usages_count >= 1
+                    ORDER BY usages_count DESC
+                    """)
+                    if cur.fetchmany(1900):
+                        await full_emoji_list_refresh(refresh_list=False, target_emoji_name=emoji_name)
+                        return await convert_emoji(demoji=demoji, smoji=smoji, is_retry=True)
+                    else:
+                        return f":{emoji_name}:"
+
         elif is_retry == False:
             emoji_list = await sapp.client.emoji_list()
             if emoji_list["ok"] == True:
-                try:
-                    cur.execute()
-                    cur.execute(emoji_list["emoji"][emoji_name])
-                except KeyError:
-                    print(f"Emoji {emoji_name} not found")
-                    await full_emoji_list_refresh()
-                    return convert_emoji(demoji=demoji, smoji=smoji, is_retry=True)
+                if emoji_name in emoji_list["emoji"]:
+                    await full_emoji_list_refresh(slack_emoji_list=emoji_list, target_emoji_name=emoji_name)
+                    return await convert_emoji(demoji=demoji, smoji=smoji, is_retry=True)
 
-
-
-
-    return
+        return emoji_in # If nothing works, just return the input
 
 @sapp.event("reaction_added")
 async def reaction_added(event, say):
@@ -571,8 +603,12 @@ async def handle_message(event, say, ack):
         print("Discord channel not found")
         return
 
-    sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
+# TODO
+    sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(convert_emoji(smoji=message["text"]), dbot.loop)), username=display_name, avatar_url=avatar_url,
                           discord_channel_id=int(discord_channel)), dbot.loop))
+
+    #sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
+    #                      discord_channel_id=int(discord_channel)), dbot.loop))
 
     await db_add_message(s_message_data=message, d_message_object=sent_discord_message_object, source="slack")
 
@@ -616,7 +652,7 @@ async def handle_slack_message_edit(event, say, ack):
             print(e)
         conn.close()
 
-# TODO: WORKING ON THIS
+
 async def check_user(message: discord.Message = None, discord_author_id = None): # Function to check if a user is allowed to send a message from discord to slack, given a discord message object
     try:
         discord_author_id = message.author.id
@@ -696,8 +732,31 @@ async def on_message(message): # Discord message listening, send to slack
             pass
         else:
             return
-        try:
-            s_message = await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
+
+        try: #TODO: It can't just stay like this, it needs to actually handle message text correctly, this is just for testing
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            #TODO
+            s_message = await sclient.chat_postMessage(channel=slack_channel_id,
+                                                       text=await convert_emoji(demoji=message.content),
+                                                       username=message.author.display_name,
+                                                       icon_url=message.author.avatar.url)
+            #s_message = await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
             await db_add_message(s_message_data=s_message, d_message_object=message, source="discord")
         except BoltError as e:
             print(f"Error sending message to slack: {e}")
