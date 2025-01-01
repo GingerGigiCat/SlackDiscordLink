@@ -1,4 +1,6 @@
 import discord
+import slack_bolt.error
+import slack_sdk
 from discord.ext import commands
 
 #import slack_sdk
@@ -14,6 +16,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from slack_bolt.authorization import AuthorizeResult
 from slack_sdk.oauth.installation_store import FileInstallationStore, Installation
 from slack_sdk.oauth.state_store import FileOAuthStateStore
+from slack_sdk.errors import SlackApiError
 
 
 import json
@@ -26,6 +29,8 @@ import functools
 import sqlite3
 import requests
 import aiohttp
+import unicodedata
+import emoji
 
 import md
 
@@ -62,7 +67,7 @@ with open("slack_bot_token", "r") as token_f:
 
                 authorise_url_generator = AuthorizeUrlGenerator(
                     client_id=slack_client_id,
-                    user_scopes=["users.profile:read"]
+                    user_scopes=["users.profile:read", "reactions:write"]
                 )
 
 #authorise_url_generator.generate()
@@ -111,7 +116,7 @@ async def oauth_callback():
             bot_id = None
             user_id = installer.get("id")
             profile = (await sapp.client.users_profile_get(token=user_token))["profile"]
-            print(profile)
+            #print(profile)
             try:
                 user_pfp = profile["image_original"]
             except KeyError:
@@ -359,7 +364,7 @@ async def edit_with_webhook(discord_channel_id, message_id, text, thread=""):
     webhook = None
     if webhooks:
         for wh in webhooks:
-            print(wh)
+            #print(wh)
             if wh.user.id == dbot.user.id:
                 webhook = wh
                 break
@@ -571,12 +576,34 @@ async def convert_emoji(demoji: str = None, smoji: str = None, is_retry=False):
                     await full_emoji_list_refresh(slack_emoji_list=emoji_list, target_emoji_name=emoji_name)
                     return await convert_emoji(demoji=demoji, smoji=smoji, is_retry=True)
 
-        return emoji_in # If nothing works, just return the input
+        if emoji_name == f"+1":
+            return "👍"
+        elif emoji_name == f"-1":
+            return "👎"
+    #print(emoji_in)
+    return emoji_in # If nothing works, just return the input
 
 @sapp.event("reaction_added")
-async def reaction_added(event, say):
-    emoji = event["event"]["reaction"]
-    print(emoji)
+@sapp.event("reaction_removed")
+async def reaction_handler_slack(event, say):
+    emoji_name = event["reaction"]
+    converted_emoji = await convert_emoji(smoji=f":{emoji_name}:")
+
+    converted_emoji = emoji.emojize(converted_emoji, language="alias")
+    #print(emoji_name, converted_emoji)
+
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        SELECT discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?
+        """, (event["item"]["ts"],))
+        message_id, channel_id = cur.fetchone()
+        if event["type"] == "reaction_added":
+            await dbot.get_guild(discord_server_id).get_channel(channel_id).get_partial_message(message_id).add_reaction(converted_emoji)
+        elif event["type"] == "reaction_removed":
+            await dbot.get_guild(discord_server_id).get_channel(channel_id).get_partial_message(message_id).remove_reaction(converted_emoji, dbot.user)
+        else:
+            print(f"AAAA unknown event type in the reaction handler, {event["type"]}")
 
 @sapp.event({"type": "message", "subtype": None}) # Slack message listening, send to discord
 async def handle_message(event, say, ack):
@@ -628,11 +655,10 @@ async def handle_slack_message_deletion(event, say, ack):
         try:
             await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.delete(), loop=dbot.loop))
         except discord.errors.NotFound:
-            conn.close()
+            conn.commit()
             return
         cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
         conn.commit()
-        conn.close()
 
 
 @sapp.event(event={"type": "message", "subtype": "message_changed"}) # Slack message editing
@@ -648,10 +674,10 @@ async def handle_slack_message_edit(event, say, ack):
         discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(dbot.get_channel(discord_channel_id).fetch_message(discord_message_id), loop=dbot.loop))
         try:
             #await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.edit(content=message["text"]), loop=dbot.loop))
-            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(edit_with_webhook(discord_channel_id=discord_channel_id, message_id=discord_message_id, text=message["text"]), dbot.loop))
+            await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(edit_with_webhook(discord_channel_id=discord_channel_id, message_id=discord_message_id, text=await handle_message_text_conversion(message["text"], True)), dbot.loop))
         except discord.errors.NotFound as e:
             print(e)
-        conn.close()
+        conn.commit()
 
 
 async def check_user(message: discord.Message = None, discord_author_id = None): # Function to check if a user is allowed to send a message from discord to slack, given a discord message object
@@ -684,7 +710,7 @@ async def do_the_whole_user_check(message: discord.Message):
     if check_result != True:
         if check_result == "unallowed":
             await reply_to_author(message,
-                                  "Looks like you're banned or muted, if you think this is a mistake, cont```````````````````````````````````````act the moderation team or ask in #hackclub-discord-bridge-management in slack or discord, or #purgatory in discord")
+                                  "Looks like you're banned or muted, if you think this is a mistake, contact the moderation team or ask in #hackclub-discord-bridge-management in slack or discord, or #purgatory in discord")
         elif check_result in ["token_revoked", "not_authed", "token_expired", "token_revoked"]:
             await reply_to_author(message,
                                   f"Hmmm you might need to authenticate yourself again, try running /auth in the discord server.\nDebug message: {check_result}")
@@ -794,7 +820,6 @@ async def on_message_delete(message):
         await sapp.client.chat_delete(channel=slack_channel_id, ts=slack_message_ts)
         cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
         conn.commit()
-        conn.close()
 
 @dbot.event
 async def on_message_edit(ogmessage, newmessage):
@@ -812,10 +837,49 @@ async def on_message_edit(ogmessage, newmessage):
         cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (newmessage.id,))
         record_id, slack_message_ts, slack_channel_id = cur.fetchone()
         try:
-            await sapp.client.chat_update(channel=slack_channel_id, ts=slack_message_ts, text=newmessage.content)
+            await sapp.client.chat_update(channel=slack_channel_id, ts=slack_message_ts, text=await handle_message_text_conversion(newmessage.content, False))
         except BoltError as e:
             print(f"Error sending message edit to slack: {e}")
-        conn.close()
+        conn.commit()
+
+
+@dbot.event
+async def on_raw_reaction_add(payload, remove=False):
+    if await check_user(discord_author_id=payload.user_id) != True:
+        return
+
+    with sqlite3.connect("main.db") as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        SELECT slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?
+        """, (payload.message_id,))
+        retrieved = cur.fetchone()
+        if not retrieved:
+            return
+        slack_message_ts, slack_channel_id = retrieved
+
+        cur.execute("""
+        SELECT slack_token FROM members WHERE discord_user_id = ?
+        """, (payload.user_id,))
+        retrieved = cur.fetchone()
+        if not retrieved:
+            return
+        slack_token = retrieved[0]
+
+        emoji_name_basic = emoji.demojize(payload.emoji.name, language="alias")
+        emoji_name_basic = (await convert_emoji(demoji=emoji_name_basic)).strip(":")
+
+        try:
+            if not remove:
+                await sapp.client.reactions_add(token=slack_token, as_user=True, channel=slack_channel_id, timestamp=slack_message_ts, name=emoji_name_basic)
+            else:
+                await sapp.client.reactions_remove(token=slack_token, as_user=True, channel=slack_channel_id, timestamp=slack_message_ts, name=emoji_name_basic)
+        except SlackApiError as e:
+            pass
+
+@dbot.event
+async def on_raw_reaction_remove(payload):
+    await on_raw_reaction_add(payload, remove=True)
 
 
 async def start_main():
@@ -834,7 +898,7 @@ threading.Thread(target=dbot.run, args=(open("discord_token", "r").read(),)).sta
 time.sleep(4)
 asyncio.set_event_loop(dbot.loop)
 try_setup_sql_first_time()
-threading.Thread(target=asyncio.run, args=(start_main(),)).start()
+asyncio.run_coroutine_threadsafe(start_main(), loop=dbot.loop)
 threading.Thread(target=flask_app.run, kwargs={"port": 3000}).start()
 #print(asyncio.run(get_oauth_url(dbot.get_user(721745855207571627)),)) # generate an oauth url for my discord user
 #print(asyncio.run(check_user(discord_author_id=721745855207571627))) # Check a user
