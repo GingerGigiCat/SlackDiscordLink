@@ -41,6 +41,7 @@ scheduler = BlockingScheduler()
 
 person_to_complain_at_name = "Gigi Cat"
 person_to_complain_at_slack_id = "U07DHR6J57U"
+slack_bot_app_id = "A07TRNSNTQW"
 slack_url = "hackclub.slack.com"
 with open("domain_name", "r") as f:
     domain_name = f.read()
@@ -97,7 +98,7 @@ async def get_oauth_url(discord_user_obj: discord.User = None): # TODO: Make dis
 
 @dbot.tree.command(name="auth", description="Get a link to log in with slack so that you can use the discord link.")
 async def oauth_discord_command(interaction:discord.Interaction):
-    await interaction.response.send_message(f"{await get_oauth_url(discord_user_obj=interaction.user)}", ephemeral=True)
+    await interaction.response.send_message(f"Click [here]({await get_oauth_url(discord_user_obj=interaction.user)}) to sign in with slack", ephemeral=True)
 
 
 @flask_app.route("/slack/oauth/callback", methods=["GET"])
@@ -154,12 +155,33 @@ async def oauth_callback():
                     """, (user_token, user_id, display_name, user_pfp, request.args["state"]))
             except sqlite3.OperationalError as e:
                 print(f"Failed to put slack bits in the members database: {e}")
-                return f"<h1> Failed to access slack user database, please DM <a href=\"https://{slack_url}/team/{person_to_complain_at_slack_id}\">@{person_to_complain_at_name}</a></h1>"
-            print("woah")
-            return "<h1> Yay you're authenticated!</h1>\n<h2> (You can close this tab now) </h2>"
+                with (open("oauth_webpage_data_python_formatting.html", "r") as the_html):
+                    return the_html.read().replace("{main_text}",
+                                                   "Error: Failed to access internal slack user database").replace(
+                                                     "{sub_text}",
+                                                     "Please DM <a href=\"https://{slack_url}/team/{person_to_complain_at_slack_id}\">@{person_to_complain_at_name}</a>").replace(
+                                                      "{text_colour}",
+                                                      "fba0b7")
+                #return f"<h1> Failed to access slack user database, please DM <a href=\"https://{slack_url}/team/{person_to_complain_at_slack_id}\">@{person_to_complain_at_name}</a></h1>"
+
+            with (open("oauth_webpage_data_python_formatting.html", "r") as the_html):
+                return the_html.read().replace("{main_text}",
+                                               "Yay you're authenticated!").replace(
+                                                "{sub_text}",
+                                                "(You can close this tab now)").replace(
+                                                "{text_colour}",
+                                                "#DFE4F9")
+            #return "<h1> Yay you're authenticated!</h1>\n<h2> (You can close this tab now) </h2>"
 
         else:
-            return "<h1> Uhhh it probably timed out so generate a new link and try again :)</h1>"
+            with (open("oauth_webpage_data_python_formatting.html", "r") as the_html):
+                return the_html.read().replace("{main_text}",
+                                               "Error: Login URL timed out").replace(
+                                                "{sub_text}",
+                                                "Generate a new link by running /auth in the discord server, and try again.\nIf this keeps happening, complain.").replace(
+                                                "{text_colour}",
+                                                "#fba0b7")
+            #return "<h1> Uhhh it probably timed out so generate a new link and try again :)</h1>"
 
 #def html(text="hi")
 #print(get_oauth_url())
@@ -271,12 +293,28 @@ async def db_add_message(s_message_data, d_message_object, source="slack"):
     except KeyError:
         slack_thread_ts = ""
     with sqlite3.connect(database_name) as conn:
-        cursor = conn.cursor()
+        cur = conn.cursor()
         if source == "slack":
-            d_message_object.author.id = 0
-            cursor.execute(messages_insert_statement, (s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], 0))
+            cur.execute("""
+            SELECT discord_user_id FROM members WHERE slack_user_id = ?
+            """, (s_message_data["user"],))
+            retrieved = cur.fetchone()
+            if retrieved:
+                discord_user_id = retrieved[0]
+            else:
+                d_message_object.author.id = 0
+            cur.execute(messages_insert_statement, (s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], 0))
         elif source == "discord":
-            cursor.execute(messages_insert_statement, (s_message_data["message"]["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, "no", d_message_object.author.id))
+            cur.execute("""
+            SELECT slack_user_id FROM members WHERE discord_user_id = ?
+            """, (d_message_object.author.id,))
+            retrieved = cur.fetchone()
+            if retrieved:
+                slack_user = retrieved[0]
+            else:
+                slack_user = "no"
+                await dbot.get_user(bot_owner_discord_user_id).send(f"UH OH SOMEONE SENT A MESSAGE TO SLACK WITHOUT BEING VERIFIED HOW IS THIS POSSIBLE, <@{d_message_object.author.id}>")
+            cur.execute(messages_insert_statement, (s_message_data["message"]["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, slack_user, d_message_object.author.id))
         conn.commit()
 
 async def refresh_channel_cache_file():
@@ -651,7 +689,6 @@ async def handle_message(event, say, ack):
 async def handle_slack_message_deletion(event, say, ack):
     await ack()
     message = event
-    print(message)
 
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
@@ -671,7 +708,7 @@ async def handle_slack_message_deletion(event, say, ack):
 async def handle_slack_message_edit(event, say, ack):
     await ack()
     message = event["message"]
-    print(message)
+    #print(message)
 
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
@@ -684,6 +721,45 @@ async def handle_slack_message_edit(event, say, ack):
         except discord.errors.NotFound as e:
             print(e)
         conn.commit()
+
+
+@sapp.shortcut("get_user_from_message")
+async def get_user_from_message(ack, shortcut, client):
+    await ack()
+    #print(shortcut["message"])
+    if "app_id" in shortcut["message"]:
+        if shortcut["message"]["app_id"] == slack_bot_app_id:
+            with sqlite3.connect("main.db") as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                SELECT slack_author_id FROM messages WHERE slack_message_ts = ?
+                """, (shortcut["message"]["ts"],))
+                slack_author_id = cur.fetchone()[0]
+
+            if slack_author_id == "no":
+                mention = "Unknown user, this shouldn't have happened, something has gone very wrong."
+            else:
+                mention = f"<@{slack_author_id}>"
+        else:
+            mention = "This message wasn't sent through the bridge!"
+    else:
+        mention = "This message wasn't sent through the bridge!"
+
+
+    await client.views_open(
+        trigger_id=shortcut["trigger_id"],
+        view={
+            "type": "modal",
+            "title": {"type": "plain_text", "text": "Get bridge slack user"},
+            "close": {"type": "plain_text", "text": "Done"},
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"{mention}"}
+                }
+            ]
+        }
+    )
 
 
 async def check_user(message: discord.Message = None, discord_author_id = None): # Function to check if a user is allowed to send a message from discord to slack, given a discord message object
