@@ -85,7 +85,11 @@ async def get_oauth_url(discord_user_obj: discord.User = None): # TODO: Make dis
         with sqlite3.connect("main.db") as conn:
             cur = conn.cursor()
             cur.execute("SELECT is_authorised, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_user_obj.id,))
-            is_authorised, send_to_slack_allowed, banned = cur.fetchone()
+            retrieved = cur.fetchone()
+            if retrieved:
+                is_authorised, send_to_slack_allowed, banned = retrieved
+            else:
+                is_authorised, send_to_slack_allowed, banned = 0, 1, 0
             cur.execute("""
             REPLACE INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, banned)
             values(?, ?, ?, ?, ?, ?, ? , ?)
@@ -631,6 +635,7 @@ async def convert_emoji(demoji: str = None, smoji: str = None, is_retry=False):
 @sapp.event("reaction_removed")
 async def reaction_handler_slack(event, say):
     emoji_name = event["reaction"]
+    #print(event)
     converted_emoji = await convert_emoji(smoji=f":{emoji_name}:")
 
     converted_emoji = emoji.emojize(converted_emoji, language="alias")
@@ -642,10 +647,38 @@ async def reaction_handler_slack(event, say):
         SELECT discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?
         """, (event["item"]["ts"],))
         message_id, channel_id = cur.fetchone()
+        message_obj = await dbot.get_guild(discord_server_id).get_channel(channel_id).fetch_message(message_id)
+        cur.execute("""
+        SELECT discord_user_id FROM members WHERE slack_user_id = ?
+        """, (event["user"],))
+        retrieved = cur.fetchone()
         if event["type"] == "reaction_added":
+            if retrieved: # If the user has already reacted, don't add another reaction from the bot on discord
+                for reaction in message_obj.reactions:
+                    #print(reaction)
+                    if type(reaction.emoji) == str:
+                        emoji_comparison = reaction.emoji == converted_emoji
+                    else:
+                        emoji_comparison = f"<:{reaction.emoji.name}:{reaction.emoji.id}>" == converted_emoji
+                    if emoji_comparison == True:
+                        users = reaction.users()
+                        async for user in users:
+                            if user.id == retrieved[0]:
+                                return
+
             await dbot.get_guild(discord_server_id).get_channel(channel_id).get_partial_message(message_id).add_reaction(converted_emoji)
         elif event["type"] == "reaction_removed":
+            reactions = await sapp.client.reactions_get(channel=event["item"]["channel"], timestamp=event["item"]["ts"])
+            #print(reactions)
+            remove_the_emoji = True
+            if "reactions" in reactions["message"]:
+                reactions = reactions["message"]["reactions"]
+                for reaction in reactions:
+                    if reaction["name"] == emoji_name:
+                        if reaction["count"] != 0:
+                            remove_the_emoji = False
             await dbot.get_guild(discord_server_id).get_channel(channel_id).get_partial_message(message_id).remove_reaction(converted_emoji, dbot.user)
+
         else:
             print(f"AAAA unknown event type in the reaction handler, {event["type"]}")
 
@@ -770,14 +803,16 @@ async def check_user(message: discord.Message = None, discord_author_id = None):
     with sqlite3.connect("main.db") as conn:
         try:
             cur = conn.cursor()
-            cur.execute("SELECT slack_pfp_url, slack_display_name, slack_token, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_author_id,))
+            cur.execute("SELECT slack_pfp_url, slack_display_name, slack_token, is_authorised, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_author_id,))
             fetched = cur.fetchone()
             if fetched == None:
                 return "notindatabase"
-            slack_pfp_url, slack_display_name, slack_token, send_to_slack_allowed, banned = fetched
-            if send_to_slack_allowed != 0 and banned != 1:
+            slack_pfp_url, slack_display_name, slack_token, is_authorised, send_to_slack_allowed, banned = fetched
+            if not slack_token:
+                return "tokenless"
+            if send_to_slack_allowed != 0 and banned != 1 and is_authorised == 1:
                 token_test = await sapp.client.auth_test(token=slack_token)
-                if token_test["ok"] == True:
+                if token_test["ok"] == True and slack_token:
                     return True
                 else:
                     return token_test["error"]
@@ -799,6 +834,8 @@ async def do_the_whole_user_check(message: discord.Message):
         elif check_result == "notindatabase":
             await reply_to_author(message,
                                   "Looks like you need to authenticate with slack! Run **/auth** in the bridge discord server to get started.")
+        elif check_result == "tokenless":
+            await reply_to_author(message, "Looks like you haven't authenticated with slack yet!\nThe bot should have given you a link to verify. You can generate a new link using /auth in the discord server.")
         else:
             print(check_result)
             await reply_to_author(message,
