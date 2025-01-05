@@ -51,6 +51,7 @@ installation_store = FileInstallationStore(base_dir="./oauth_data")
 dbot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 bot_owner_discord_user_id = 721745855207571627
 discord_server_id = 1301317329333784668
+#discord_authorised_role_id = 1325554059465195611 # Does it by name "Authorised"
 main_discord_server_object = None
 allowed_mentions = discord.AllowedMentions(roles=False, everyone=False)
 allowed_channels = ["hackclub-discord-bridge-management", "bot-spam"] # Blank means all channel are allowed, this had to be added because of hack club things
@@ -158,6 +159,10 @@ async def oauth_callback():
                         is_authorised = 0
                         
                         """, ("NO" + user_id,))
+                        try:
+                            await dbot.get_guild(discord_server_id).get_member(retrieved[0]).remove_roles(discord.utils.get(dbot.get_guild(discord_server_id).roles, name="Authorised"))
+                        except:
+                            pass
                         unlinked = True
                         old_discord_username = retrieved[1]
 
@@ -172,6 +177,17 @@ async def oauth_callback():
                     WHERE state_temp = ?
             
                     """, (user_token, user_id, display_name, user_pfp, request.args["state"]))
+                    conn.commit()
+
+                    # Add the authorised role to the user
+                    cur.execute("""
+                    SELECT discord_user_id FROM members WHERE slack_user_id = ? AND is_authorised = 1
+                    """, (user_id,))
+                    new_discord_user_id = cur.fetchone()[0]
+                    asyncio.run_coroutine_threadsafe(dbot.get_guild(discord_server_id).get_member(new_discord_user_id).add_roles(
+                        discord.utils.get(dbot.get_guild(discord_server_id).roles, name="Authorised")), loop=dbot.loop)
+
+
             except sqlite3.OperationalError as e:
                 print(f"Failed to put slack bits in the members database: {e}")
                 with (open("oauth_webpage_data_python_formatting.html", "r") as the_html):
@@ -749,7 +765,11 @@ async def handle_slack_message_deletion(event, say, ack):
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["previous_message"]["ts"],))
-        record_id, discord_message_id, discord_channel_id = cur.fetchone()
+        retrieved = cur.fetchone()
+        if retrieved:
+            record_id, discord_message_id, discord_channel_id = retrieved
+        else:
+            return
         discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(dbot.get_channel(discord_channel_id).fetch_message(discord_message_id), loop=dbot.loop))
         try:
             await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.delete(), loop=dbot.loop))
@@ -769,13 +789,17 @@ async def handle_slack_message_edit(event, say, ack):
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["ts"],))
-        record_id, discord_message_id, discord_channel_id = cur.fetchone()
+        retrieved = cur.fetchone()
+        if retrieved:
+            record_id, discord_message_id, discord_channel_id = retrieved
+        else:
+            return
         discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(dbot.get_channel(discord_channel_id).fetch_message(discord_message_id), loop=dbot.loop))
         try:
             #await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.edit(content=message["text"]), loop=dbot.loop))
             await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(edit_with_webhook(discord_channel_id=discord_channel_id, message_id=discord_message_id, text=await handle_message_text_conversion(message["text"], True)), dbot.loop))
         except discord.errors.NotFound as e:
-            print(e)
+            print("Error sending message edit to discord: ", e)
         conn.commit()
 
 
@@ -838,8 +862,18 @@ async def check_user(message: discord.Message = None, discord_author_id = None):
                 if token_test["ok"] == True and slack_token:
                     return True
                 else:
+                    try: # Remove authorised role
+                        await dbot.get_guild(discord_server_id).get_member(discord_author_id).remove_roles(
+                            discord.utils.get(dbot.get_guild(discord_server_id).roles, name="Authorised"))
+                    except:
+                        pass
                     return token_test["error"]
             else:
+                try: # Remove authorised role
+                    await dbot.get_guild(discord_server_id).get_member(discord_author_id).remove_roles(
+                        discord.utils.get(dbot.get_guild(discord_server_id).roles, name="Authorised"))
+                except:
+                    pass
                 return "unallowed"
         except Exception as e:
             return e
@@ -963,7 +997,11 @@ async def on_message_delete(message):
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (message.id,))
-        record_id, slack_message_ts, slack_channel_id = cur.fetchone()
+        retrieved = cur.fetchone()
+        if retrieved:
+            record_id, slack_message_ts, slack_channel_id = retrieved
+        else:
+            return
         await sapp.client.chat_delete(channel=slack_channel_id, ts=slack_message_ts)
         cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
         conn.commit()
@@ -982,7 +1020,11 @@ async def on_message_edit(ogmessage, newmessage):
     with sqlite3.connect("main.db") as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (newmessage.id,))
-        record_id, slack_message_ts, slack_channel_id = cur.fetchone()
+        retrieved = cur.fetchone()
+        if retrieved:
+            record_id, slack_message_ts, slack_channel_id = retrieved
+        else:
+            return
         try:
             await sapp.client.chat_update(channel=slack_channel_id, ts=slack_message_ts, text=await handle_message_text_conversion(newmessage.content, False))
         except BoltError as e:
@@ -1033,6 +1075,7 @@ async def start_main():
     with open("slack_app_token", "r") as token_f:
         handler = AsyncSocketModeHandler(sapp, token_f.read())
     await handler.start_async()
+
 
 #slack_events_adapter.start(port=3000)
 #slack_thread = threading.Thread(target=SocketModeHandler.start, args=('sapp', open("slack_bot_token", "r").read()))

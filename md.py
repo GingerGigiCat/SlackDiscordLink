@@ -12,9 +12,12 @@ def convertLinks(content, is_slack):
     if is_slack:
         found_links = content.split('<')
         for raw in found_links:
-            if raw.startswith('http') != True:
-                continue
-            content = content.replace("<"+raw.split('>')[0]+ ">",  f'[{raw.split('|')[1].split('>')[0]}]({raw.split("|")[0]})')
+            try:
+                if raw.startswith('http') != True:
+                    continue
+                content = content.replace("<"+raw.split('>')[0]+ ">",  f'[{raw.split('|')[1].split('>')[0]}]({raw.split("|")[0]})')
+            except IndexError:
+                pass
     else:
         found_links = content.split('[')
         for raw in found_links:
