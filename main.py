@@ -77,7 +77,7 @@ with open("slack_bot_token", "r") as token_f:
 async def on_oauth_callback(what):
     print(what)
 
-async def get_oauth_url(discord_user_obj: discord.User = None): # TODO: Make discord slash command to verify
+async def get_oauth_url(discord_user_obj: discord.User = None):
     state = oauth_state_store.issue()
     url = authorise_url_generator.generate(state)
 
@@ -106,7 +106,8 @@ async def oauth_discord_command(interaction:discord.Interaction):
 
 
 @flask_app.route("/slack/oauth/callback", methods=["GET"])
-async def oauth_callback():
+async def oauth_callback(): # TODO: STOP PEOPLE FROM HAVING MULTIPLE DISCORDS LINKED TO SAME SLACK
+    unlinked = False
     if "code" in request.args:
         if oauth_state_store.consume(request.args["state"]):
             client = AsyncWebClient()
@@ -147,6 +148,20 @@ async def oauth_callback():
                 with sqlite3.connect("main.db") as conn:
                     cur = conn.cursor()
                     cur.execute("""
+                    SELECT discord_user_id, discord_username FROM members WHERE slack_user_id = ? AND is_authorised = 1
+                    """, (user_id,))
+                    retrieved = cur.fetchone()
+                    if retrieved:
+                        cur.execute("""
+                        UPDATE members
+                        SET slack_user_id = ?,
+                        is_authorised = 0
+                        
+                        """, ("NO" + user_id,))
+                        unlinked = True
+                        old_discord_username = retrieved[1]
+
+                    cur.execute("""
                     UPDATE members
                     SET slack_token = ?,
                         state_temp = "",
@@ -169,6 +184,14 @@ async def oauth_callback():
                 #return f"<h1> Failed to access slack user database, please DM <a href=\"https://{slack_url}/team/{person_to_complain_at_slack_id}\">@{person_to_complain_at_name}</a></h1>"
 
             with (open("oauth_webpage_data_python_formatting.html", "r") as the_html):
+                if unlinked:
+                    return the_html.read().replace("{main_text}",
+                                                   "Yay you're authenticated!").replace(
+                                                   "{sub_text}",
+                                                   f"By authenticating with this account, the discord user @{old_discord_username} was unlinked from your slack account.\n(You can close this tab now)").replace(
+                                                   "{text_colour}",
+                                                   "#DFE4F9")
+
                 return the_html.read().replace("{main_text}",
                                                "Yay you're authenticated!").replace(
                                                 "{sub_text}",
@@ -300,7 +323,7 @@ async def db_add_message(s_message_data, d_message_object, source="slack"):
         cur = conn.cursor()
         if source == "slack":
             cur.execute("""
-            SELECT discord_user_id FROM members WHERE slack_user_id = ?
+            SELECT discord_user_id FROM members WHERE slack_user_id = ? AND is_authorised = 1
             """, (s_message_data["user"],))
             retrieved = cur.fetchone()
             if retrieved:
@@ -649,7 +672,7 @@ async def reaction_handler_slack(event, say):
         message_id, channel_id = cur.fetchone()
         message_obj = await dbot.get_guild(discord_server_id).get_channel(channel_id).fetch_message(message_id)
         cur.execute("""
-        SELECT discord_user_id FROM members WHERE slack_user_id = ?
+        SELECT discord_user_id FROM members WHERE slack_user_id = ? AND is_authorised = 1
         """, (event["user"],))
         retrieved = cur.fetchone()
         if event["type"] == "reaction_added":
