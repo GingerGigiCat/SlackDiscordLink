@@ -106,7 +106,7 @@ async def oauth_discord_command(interaction:discord.Interaction):
 
 
 @flask_app.route("/slack/oauth/callback", methods=["GET"])
-async def oauth_callback(): # TODO: STOP PEOPLE FROM HAVING MULTIPLE DISCORDS LINKED TO SAME SLACK
+async def oauth_callback():
     unlinked = False
     if "code" in request.args:
         if oauth_state_store.consume(request.args["state"]):
