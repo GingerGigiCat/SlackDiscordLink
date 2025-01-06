@@ -26,7 +26,7 @@ import threading
 import asyncio
 import concurrent.futures
 import functools
-import sqlite3
+import aiosqlite as sqlite3
 import requests
 import aiohttp
 import unicodedata
@@ -83,19 +83,20 @@ async def get_oauth_url(discord_user_obj: discord.User = None):
     url = authorise_url_generator.generate(state)
 
     try:
-        with sqlite3.connect("main.db") as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT is_authorised, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_user_obj.id,))
-            retrieved = cur.fetchone()
+        async with sqlite3.connect("main.db") as conn:
+            cur = await conn.cursor()
+            await cur.execute("SELECT is_authorised, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_user_obj.id,))
+            retrieved = await cur.fetchone()
             if retrieved:
                 is_authorised, send_to_slack_allowed, banned = retrieved
             else:
                 is_authorised, send_to_slack_allowed, banned = 0, 1, 0
-            cur.execute("""
+            await cur.execute("""
             REPLACE INTO members(discord_user_id, discord_pfp_url, discord_display_name, discord_username, state_temp, is_authorised, send_to_slack_allowed, banned)
             values(?, ?, ?, ?, ?, ?, ? , ?)
             """, (discord_user_obj.id, discord_user_obj.avatar.url, discord_user_obj.display_name, discord_user_obj.name, state, 0, send_to_slack_allowed, banned))
-            conn.commit()
+            await conn.commit()
+            await cur.close()
     except sqlite3.OperationalError as e:
         print(e)
 
@@ -146,14 +147,14 @@ async def oauth_callback():
                 if is_enterprise_install:
                     enterprise_url = await auth_test.get("url")
             try:
-                with sqlite3.connect("main.db") as conn:
-                    cur = conn.cursor()
-                    cur.execute("""
+                async with sqlite3.connect("main.db") as conn:
+                    cur = await conn.cursor()
+                    await cur.execute("""
                     SELECT discord_user_id, discord_username FROM members WHERE slack_user_id = ? AND is_authorised = 1
                     """, (user_id,))
-                    retrieved = cur.fetchone()
+                    retrieved = await cur.fetchone()
                     if retrieved:
-                        cur.execute("""
+                        await cur.execute("""
                         UPDATE members
                         SET slack_user_id = ?,
                         is_authorised = 0
@@ -166,7 +167,7 @@ async def oauth_callback():
                         unlinked = True
                         old_discord_username = retrieved[1]
 
-                    cur.execute("""
+                    await cur.execute("""
                     UPDATE members
                     SET slack_token = ?,
                         state_temp = "",
@@ -177,15 +178,16 @@ async def oauth_callback():
                     WHERE state_temp = ?
             
                     """, (user_token, user_id, display_name, user_pfp, request.args["state"]))
-                    conn.commit()
+                    await conn.commit()
 
                     # Add the authorised role to the user
-                    cur.execute("""
+                    await cur.execute("""
                     SELECT discord_user_id FROM members WHERE slack_user_id = ? AND is_authorised = 1
                     """, (user_id,))
-                    new_discord_user_id = cur.fetchone()[0]
-                    asyncio.run_coroutine_threadsafe(dbot.get_guild(discord_server_id).get_member(new_discord_user_id).add_roles(
-                        discord.utils.get(dbot.get_guild(discord_server_id).roles, name="Authorised")), loop=dbot.loop)
+                    new_discord_user_id = (await cur.fetchone())[0]
+                    await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(dbot.get_guild(discord_server_id).get_member(new_discord_user_id).add_roles(
+                        discord.utils.get(dbot.get_guild(discord_server_id).roles, name="Authorised")), loop=dbot.loop))
+                    await cur.close()
 
 
             except sqlite3.OperationalError as e:
@@ -235,9 +237,9 @@ async def oauth_callback():
 #slack_events_adapter = SlackEventAdapter(SLACK_SIGNING_SECRET, endpoint="/slack/events")
 
 database_name = "main.db"
-
-with sqlite3.connect(database_name) as conn:
-    print("did the thing")
+async def create_database():
+    async with sqlite3.connect(database_name) as conn:
+        print("did the thing")
 
 try:
     with open("./discord_to_slack_channel.json", "r+") as the_file:
@@ -251,7 +253,7 @@ except json.decoder.JSONDecodeError as e:
 sc_to_dc = {v: k for k, v in dc_to_sc.items()} # Swap the discord to slack channel dictionary around so that a discord channel can be looked up from the slack channel
 
 
-def try_setup_sql_first_time():
+async def try_setup_sql_first_time():
     messages_table_statement = """
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -261,6 +263,7 @@ def try_setup_sql_first_time():
         slack_thread_ts TEXT,
         slack_channel_id TEXT NOT NULL,
         discord_channel_id INT NOT NULL,
+        discord_thread_id INT,
         slack_author_id TEXT NOT NULL,
         discord_author_id INT NOT NULL
     )
@@ -314,51 +317,61 @@ def try_setup_sql_first_time():
     )"""
 
     try:
-        with sqlite3.connect(database_name) as conn:
-            cursor = conn.cursor()
-            cursor.execute(messages_table_statement) # Create the table of messages if it doesn't exist
-            cursor.execute(channels_table_statement) # Create the table of channels if it doesn't exist
-            cursor.execute(members_table_statement) # Create it for members
-            cursor.execute(emojis_table_statement) # Create table of emojis
+        async with sqlite3.connect(database_name) as conn:
+            cur = await conn.cursor()
+            await cur.execute(messages_table_statement) # Create the table of messages if it doesn't exist
+            await cur.execute(channels_table_statement) # Create the table of channels if it doesn't exist
+            await cur.execute(members_table_statement) # Create it for members
+            await cur.execute(emojis_table_statement) # Create table of emojis
 
-            conn.commit()
+            await conn.commit()
+            await cur.close()
             print("Yay made the tables")
     except sqlite3.OperationalError as e:
         print("Failed to create tables:", e)
 
 async def db_add_message(s_message_data, d_message_object, source="slack"):
     messages_insert_statement = f"""
-    INSERT INTO messages(slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id)
-    VALUES(?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages(slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id, discord_thread_id)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
     """
     try:
-        slack_thread_ts = s_message_data["slack_thread_ts"]
+        slack_thread_ts = s_message_data["thread_ts"]
     except KeyError:
         slack_thread_ts = ""
-    with sqlite3.connect(database_name) as conn:
-        cur = conn.cursor()
+    if type(d_message_object.channel) == discord.Thread:
+        d_message_thread_id = d_message_object.channel.id
+        d_message_channel_id = d_message_object.channel.parent.id
+    else:
+        d_message_thread_id = 0
+        d_message_channel_id = d_message_object.channel.id
+
+    async with sqlite3.connect(database_name) as conn:
+        cur = await conn.cursor()
         if source == "slack":
-            cur.execute("""
+            await cur.execute("""
             SELECT discord_user_id FROM members WHERE slack_user_id = ? AND is_authorised = 1
             """, (s_message_data["user"],))
-            retrieved = cur.fetchone()
+            retrieved = await cur.fetchone()
             if retrieved:
                 discord_user_id = retrieved[0]
             else:
-                d_message_object.author.id = 0
-            cur.execute(messages_insert_statement, (s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, s_message_data["user"], 0))
+                discord_user_id = 0
+            await cur.execute(messages_insert_statement, (s_message_data["ts"], d_message_object.id, s_message_data["channel"], d_message_channel_id, slack_thread_ts, s_message_data["user"], discord_user_id, d_message_thread_id))
         elif source == "discord":
-            cur.execute("""
+            await cur.execute("""
             SELECT slack_user_id FROM members WHERE discord_user_id = ?
             """, (d_message_object.author.id,))
-            retrieved = cur.fetchone()
+            retrieved = await cur.fetchone()
             if retrieved:
                 slack_user = retrieved[0]
             else:
                 slack_user = "no"
                 await dbot.get_user(bot_owner_discord_user_id).send(f"UH OH SOMEONE SENT A MESSAGE TO SLACK WITHOUT BEING VERIFIED HOW IS THIS POSSIBLE, <@{d_message_object.author.id}>")
-            cur.execute(messages_insert_statement, (s_message_data["message"]["ts"], d_message_object.id, s_message_data["channel"], d_message_object.channel.id, slack_thread_ts, slack_user, d_message_object.author.id))
-        conn.commit()
+
+            await cur.execute(messages_insert_statement, (s_message_data["message"]["ts"], d_message_object.id, s_message_data["channel"], d_message_channel_id, slack_thread_ts, slack_user, d_message_object.author.id, d_message_thread_id))
+        await conn.commit()
+        await cur.close()
 
 async def refresh_channel_cache_file():
     sc_to_dc = {v: k for k, v in dc_to_sc.items()}
@@ -416,20 +429,20 @@ async def discord_channel_to_slack_channel(discord_channel_id):
     try: # Try get the id from a cache
         return dc_to_sc[str(discord_channel_id)]
     except KeyError:
-        discord_channel = get_discord_channel_object_from_id(discord_channel_id)
+        discord_channel = await get_discord_channel_object_from_id(discord_channel_id)
         if discord_channel == None:
             return
         discord_chan_name = discord_channel.name()
         if not (allowed_channels == None or discord_chan_name in allowed_channels):
             return
-        slack_channel_id = get_slack_channel_id(discord_chan_name)
+        slack_channel_id = await get_slack_channel_id(discord_chan_name)
         if slack_channel_id == None:
             return None
         dc_to_sc[str(discord_channel_id)] = slack_channel_id
         await refresh_channel_cache_file()
         return slack_channel_id
 
-async def send_with_webhook(discord_channel_id, message, username, avatar_url):
+async def send_with_webhook(discord_channel_id, message, username, avatar_url, discord_thread_obj=None):
     channel = dbot.get_channel(discord_channel_id)
     webhooks = await channel.webhooks()
     webhook = None
@@ -443,7 +456,10 @@ async def send_with_webhook(discord_channel_id, message, username, avatar_url):
         print(f"Creating new webhook in #{channel.name}")
         webhook = await channel.create_webhook(name="Slack Link")
     #print(f"Sending message to {webhook}: {message}, {username}, {avatar_url}")
-    return await webhook.send(content=message, username=username, avatar_url=avatar_url, wait=True, allowed_mentions=allowed_mentions)
+    if discord_thread_obj:
+        return await webhook.send(content=message, username=username, avatar_url=avatar_url, wait=True, allowed_mentions=allowed_mentions, thread=discord_thread_obj)
+    else:
+        return await webhook.send(content=message, username=username, avatar_url=avatar_url, wait=True, allowed_mentions=allowed_mentions)
 
 async def edit_with_webhook(discord_channel_id, message_id, text, thread=""):
     channel = dbot.get_channel(discord_channel_id)
@@ -463,8 +479,8 @@ async def edit_with_webhook(discord_channel_id, message_id, text, thread=""):
 
 
 async def full_emoji_list_refresh(slack_emoji_list=None, target_emoji_name="", refresh_list=True):
-    with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
+    async with sqlite3.connect("main.db") as conn:
+        cur = await conn.cursor()
 
         # Get the full list of emojis from slack and update the database with it
         if refresh_list:
@@ -483,13 +499,13 @@ async def full_emoji_list_refresh(slack_emoji_list=None, target_emoji_name="", r
                         usages_count = 1
                     else:
                         usages_count = 0
-                    cur.execute("""
+                    await cur.execute("""
                     INSERT INTO emojis(emoji_name, slack_url, is_animated, usages_count)
                     values(?, ?, ?, ?)
                     ON CONFLICT(emoji_name) DO UPDATE SET 
                     slack_url=EXCLUDED.slack_url
                     """, (key, value, is_animated, usages_count))
-                conn.commit()
+                await conn.commit()
                 print("Emoji list database refreshed, now refreshing emojis in discord...")
 
         for i in range(2):
@@ -539,8 +555,8 @@ async def full_emoji_list_refresh(slack_emoji_list=None, target_emoji_name="", r
 
                 if guild: parameters_temp = (i,)
                 else: parameters_temp = ()
-                cur.execute(select_statement_temp, parameters_temp)
-                fetched = cur.fetchmany(number_to_fetch)
+                await cur.execute(select_statement_temp, parameters_temp)
+                fetched = await cur.fetchmany(number_to_fetch)
                 for db_emoji in fetched:
                     emoji_name, slack_url, is_in_discord, is_animated, usages_count = db_emoji
                     updated_emoji_list.append([emoji_name, slack_url])
@@ -556,7 +572,7 @@ async def full_emoji_list_refresh(slack_emoji_list=None, target_emoji_name="", r
                 await dbot.get_emoji(emoji[1]).delete()
                 if guild: column_to_change_temp = "is_in_discord_server"
                 else: column_to_change_temp = "is_in_bot_cache"
-                cur.execute(f"""
+                await cur.execute(f"""
                 UPDATE emojis
                 SET {column_to_change_temp} = 0
                 WHERE emoji_name = ?
@@ -580,7 +596,7 @@ async def full_emoji_list_refresh(slack_emoji_list=None, target_emoji_name="", r
                     #print(created_emoji, created_emoji.id)
                     #print(emoji[0])
 
-                    cur.execute(f"""
+                    await cur.execute(f"""
                     UPDATE emojis
                     SET {emoji_id_column_to_change_temp} = ?,
                     {is_in_discord_column_to_change_temp} = 1
@@ -589,7 +605,8 @@ async def full_emoji_list_refresh(slack_emoji_list=None, target_emoji_name="", r
                     #print("a")
 
             print(f"Big emoji refresh done for discord {guild_or_app}! (maybe)")
-        conn.commit()
+        await conn.commit()
+        await cur.close()
 
     # Emoji db format
     """
@@ -604,8 +621,8 @@ async def full_emoji_list_refresh(slack_emoji_list=None, target_emoji_name="", r
                 """
 
 async def convert_emoji(demoji: str = None, smoji: str = None, is_retry=False):
-    with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
+    async with sqlite3.connect("main.db") as conn:
+        cur = await conn.cursor()
         if demoji: emoji_in = demoji
         elif smoji: emoji_in = smoji
         else: raise ValueError("No emoji text given")
@@ -618,17 +635,17 @@ async def convert_emoji(demoji: str = None, smoji: str = None, is_retry=False):
             return emoji_in
         emoji_name = emoji_in[first_colon_index+1 : second_colon_index]
 
-        cur.execute("""
+        await cur.execute("""
         SELECT discord_emoji_id_server, discord_emoji_id_app, is_in_discord_server, is_in_bot_cache, is_animated FROM emojis WHERE emoji_name=?
         """, (emoji_name,))
 
-        retrieved = cur.fetchone()
+        retrieved = await cur.fetchone()
         if retrieved:
             if not is_retry:
-                cur.execute("""
+                await cur.execute("""
                 UPDATE emojis SET usages_count = usages_count + 1 WHERE emoji_name=?
                 """, (emoji_name,))
-                conn.commit()
+                await conn.commit()
             discord_emoji_id_server, discord_emoji_id_app, is_in_discord_server, is_in_bot_cache, is_animated = retrieved
 
             if demoji:
@@ -640,18 +657,21 @@ async def convert_emoji(demoji: str = None, smoji: str = None, is_retry=False):
                     prefix_temp = ""
                 if is_in_discord_server:
                     emoji_id = discord_emoji_id_server
+                    await cur.close()
                     return f"<{prefix_temp}:{emoji_name}:{emoji_id}>"
                 elif is_in_bot_cache:
                     emoji_id = discord_emoji_id_app
+                    await cur.close()
                     return f"<{prefix_temp}:{emoji_name}:{emoji_id}>"
                 else:
-                    cur.execute("""
+                    await cur.execute("""
                     SELECT emoji_name, is_in_discord_server, is_in_bot_cache, is_animated, usages_count FROM emojis
                     WHERE usages_count >= 1
                     ORDER BY usages_count DESC
                     """)
-                    if cur.fetchmany(1900):
+                    if await cur.fetchmany(1900):
                         await full_emoji_list_refresh(refresh_list=False, target_emoji_name=emoji_name)
+                        await cur.close()
                         return await convert_emoji(demoji=demoji, smoji=smoji, is_retry=True)
                     else:
                         return f":{emoji_name}:"
@@ -661,6 +681,7 @@ async def convert_emoji(demoji: str = None, smoji: str = None, is_retry=False):
             if emoji_list["ok"] == True:
                 if emoji_name in emoji_list["emoji"]:
                     await full_emoji_list_refresh(slack_emoji_list=emoji_list, target_emoji_name=emoji_name)
+                    await cur.close()
                     return await convert_emoji(demoji=demoji, smoji=smoji, is_retry=True)
 
         if emoji_name == f"+1":
@@ -680,17 +701,18 @@ async def reaction_handler_slack(event, say):
     converted_emoji = emoji.emojize(converted_emoji, language="alias")
     #print(emoji_name, converted_emoji)
 
-    with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
-        cur.execute("""
+    async with sqlite3.connect("main.db") as conn:
+        cur = await conn.cursor()
+        await cur.execute("""
         SELECT discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?
         """, (event["item"]["ts"],))
-        message_id, channel_id = cur.fetchone()
+        message_id, channel_id = await cur.fetchone()
         message_obj = await dbot.get_guild(discord_server_id).get_channel(channel_id).fetch_message(message_id)
-        cur.execute("""
+        await cur.execute("""
         SELECT discord_user_id FROM members WHERE slack_user_id = ? AND is_authorised = 1
         """, (event["user"],))
-        retrieved = cur.fetchone()
+        retrieved = await cur.fetchone()
+        await cur.close()
         if event["type"] == "reaction_added":
             if retrieved: # If the user has already reacted, don't add another reaction from the bot on discord
                 for reaction in message_obj.reactions:
@@ -721,12 +743,13 @@ async def reaction_handler_slack(event, say):
         else:
             print(f"AAAA unknown event type in the reaction handler, {event["type"]}")
 
+
 @sapp.event({"type": "message", "subtype": None}) # Slack message listening, send to discord
 async def handle_message(event, say, ack):
     await ack()
     message = event
     sclient = sapp.client
-    #print(message)
+    print(message)
 
     #await say(":)")
     try:
@@ -748,8 +771,34 @@ async def handle_message(event, say, ack):
         print("Discord channel not found")
         return
 
-    sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(handle_message_text_conversion(message["text"], True), dbot.loop)), username=display_name, avatar_url=avatar_url,
-                          discord_channel_id=int(discord_channel)), dbot.loop))
+    discord_thread_obj = None
+    if "thread_ts" in message:
+        thread_ts = message["thread_ts"]
+        async with sqlite3.connect("main.db") as conn:
+            cur = await conn.cursor()
+            await cur.execute("""
+            SELECT discord_channel_id, discord_thread_id FROM messages WHERE slack_thread_ts = ?
+            """, (thread_ts,))
+            retrieved = await cur.fetchone()
+            if retrieved:
+                discord_channel, discord_thread_id = retrieved
+                thread_discord_channel_obj = dbot.get_guild(discord_server_id).get_channel(discord_channel).get_thread(discord_thread_id)
+            else:
+                await cur.execute("""
+                SELECT discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?
+                """, (thread_ts,))
+                dsource_message_id, dsource_channel_id = await cur.fetchone()
+                thread_discord_channel_obj = await (await dbot.get_channel(dsource_channel_id).fetch_message(dsource_message_id)).create_thread(name="Thread")
+                discord_thread_id = thread_discord_channel_obj.id
+            await cur.close()
+    else:
+        thread_discord_channel_obj = None
+
+    print(thread_discord_channel_obj)
+    sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(
+        send_with_webhook(discord_channel_id=int(discord_channel), message=await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(handle_message_text_conversion(message["text"], True), dbot.loop)),
+                          username=display_name, avatar_url=avatar_url, discord_thread_obj=thread_discord_channel_obj), dbot.loop))
 
     #sent_discord_message_object = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(send_with_webhook(message=message["text"], username=display_name, avatar_url=avatar_url,
     #                      discord_channel_id=int(discord_channel)), dbot.loop))
@@ -762,10 +811,10 @@ async def handle_slack_message_deletion(event, say, ack):
     await ack()
     message = event
 
-    with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["previous_message"]["ts"],))
-        retrieved = cur.fetchone()
+    async with sqlite3.connect("main.db") as conn:
+        cur = await conn.cursor()
+        await cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["previous_message"]["ts"],))
+        retrieved = await cur.fetchone()
         if retrieved:
             record_id, discord_message_id, discord_channel_id = retrieved
         else:
@@ -774,10 +823,11 @@ async def handle_slack_message_deletion(event, say, ack):
         try:
             await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(discord_message_object.delete(), loop=dbot.loop))
         except discord.errors.NotFound:
-            conn.commit()
+            await conn.commit()
             return
-        cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
-        conn.commit()
+        await cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
+        await conn.commit()
+        await cur.close()
 
 
 @sapp.event(event={"type": "message", "subtype": "message_changed"}) # Slack message editing
@@ -786,10 +836,10 @@ async def handle_slack_message_edit(event, say, ack):
     message = event["message"]
     #print(message)
 
-    with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["ts"],))
-        retrieved = cur.fetchone()
+    async with sqlite3.connect("main.db") as conn:
+        cur = await conn.cursor()
+        await cur.execute("SELECT id, discord_message_id, discord_channel_id FROM messages WHERE slack_message_ts = ?", (message["ts"],))
+        retrieved = await cur.fetchone()
         if retrieved:
             record_id, discord_message_id, discord_channel_id = retrieved
         else:
@@ -800,7 +850,8 @@ async def handle_slack_message_edit(event, say, ack):
             await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(edit_with_webhook(discord_channel_id=discord_channel_id, message_id=discord_message_id, text=await handle_message_text_conversion(message["text"], True)), dbot.loop))
         except discord.errors.NotFound as e:
             print("Error sending message edit to discord: ", e)
-        conn.commit()
+        await conn.commit()
+        await cur.close()
 
 
 @sapp.shortcut("get_user_from_message")
@@ -809,12 +860,13 @@ async def get_user_from_message(ack, shortcut, client):
     #print(shortcut["message"])
     if "app_id" in shortcut["message"]:
         if shortcut["message"]["app_id"] == slack_bot_app_id:
-            with sqlite3.connect("main.db") as conn:
-                cur = conn.cursor()
-                cur.execute("""
+            async with sqlite3.connect("main.db") as conn:
+                cur = await conn.cursor()
+                await cur.execute("""
                 SELECT slack_author_id FROM messages WHERE slack_message_ts = ?
                 """, (shortcut["message"]["ts"],))
-                slack_author_id = cur.fetchone()[0]
+                slack_author_id = (await cur.fetchone())[0]
+                await cur.close()
 
             if slack_author_id == "no":
                 mention = "Unknown user, this shouldn't have happened, something has gone very wrong."
@@ -847,11 +899,12 @@ async def check_user(message: discord.Message = None, discord_author_id = None):
         discord_author_id = message.author.id
     except:
         pass
-    with sqlite3.connect("main.db") as conn:
+    async with sqlite3.connect("main.db") as conn:
         try:
-            cur = conn.cursor()
-            cur.execute("SELECT slack_pfp_url, slack_display_name, slack_token, is_authorised, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_author_id,))
-            fetched = cur.fetchone()
+            cur = await conn.cursor()
+            await cur.execute("SELECT slack_pfp_url, slack_display_name, slack_token, is_authorised, send_to_slack_allowed, banned FROM members WHERE discord_user_id = ?", (discord_author_id,))
+            fetched = await cur.fetchone()
+            await cur.close()
             if fetched == None:
                 return "notindatabase"
             slack_pfp_url, slack_display_name, slack_token, is_authorised, send_to_slack_allowed, banned = fetched
@@ -968,7 +1021,22 @@ async def on_message(message): # Discord message listening, send to slack
         message.reply("Sorry, threads aren't supported yet!")
         return
     elif message.guild.id == discord_server_id:
-        slack_channel_id = await discord_channel_to_slack_channel(message.channel.id)
+        if type(message.channel) == discord.channel.Thread:
+            slack_channel_id = await discord_channel_to_slack_channel(message.channel.parent.id)
+            async with sqlite3.connect("main.db") as conn:
+                cur = await conn.cursor()
+                await cur.execute("""
+                SELECT slack_thread_ts FROM messages WHERE discord_thread_id = ?
+                """, (message.channel.id,))
+                retrieved = await cur.fetchone()
+                await cur.close()
+                if retrieved:
+                    slack_thread_ts = retrieved[0]
+                else:
+                    slack_thread_ts = ""
+        else:
+            slack_channel_id = await discord_channel_to_slack_channel(message.channel.id)
+            slack_thread_ts = ""
         #print(2)
         if slack_channel_id == None:
             return
@@ -981,7 +1049,9 @@ async def on_message(message): # Discord message listening, send to slack
             s_message = await sclient.chat_postMessage(channel=slack_channel_id,
                                                        text=await handle_message_text_conversion(message.content, False),
                                                        username=message.author.display_name,
-                                                       icon_url=message.author.avatar.url)
+                                                       icon_url=message.author.avatar.url,
+                                                       thread_ts=slack_thread_ts
+                                                       )
             #s_message = await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
             await db_add_message(s_message_data=s_message, d_message_object=message, source="discord")
         except BoltError as e:
@@ -994,17 +1064,18 @@ async def on_message_delete(message):
     elif message.webhook_id != None: # Don't repost messages from the webhook
         return
 
-    with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (message.id,))
-        retrieved = cur.fetchone()
+    async with sqlite3.connect("main.db") as conn:
+        cur = await conn.cursor()
+        await cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (message.id,))
+        retrieved = await cur.fetchone()
         if retrieved:
             record_id, slack_message_ts, slack_channel_id = retrieved
         else:
             return
         await sapp.client.chat_delete(channel=slack_channel_id, ts=slack_message_ts)
-        cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
-        conn.commit()
+        await cur.execute("DELETE FROM messages WHERE id = ?", (record_id,))
+        await conn.commit()
+        await cur.close()
 
 @dbot.event
 async def on_message_edit(ogmessage, newmessage):
@@ -1017,10 +1088,10 @@ async def on_message_edit(ogmessage, newmessage):
     else:
         return
 
-    with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (newmessage.id,))
-        retrieved = cur.fetchone()
+    async with sqlite3.connect("main.db") as conn:
+        cur = await conn.cursor()
+        await cur.execute("SELECT id, slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?", (newmessage.id,))
+        retrieved = await cur.fetchone()
         if retrieved:
             record_id, slack_message_ts, slack_channel_id = retrieved
         else:
@@ -1029,7 +1100,7 @@ async def on_message_edit(ogmessage, newmessage):
             await sapp.client.chat_update(channel=slack_channel_id, ts=slack_message_ts, text=await handle_message_text_conversion(newmessage.content, False))
         except BoltError as e:
             print(f"Error sending message edit to slack: {e}")
-        conn.commit()
+        await cur.close()
 
 
 @dbot.event
@@ -1037,20 +1108,21 @@ async def on_raw_reaction_add(payload, remove=False):
     if await check_user(discord_author_id=payload.user_id) != True:
         return
 
-    with sqlite3.connect("main.db") as conn:
-        cur = conn.cursor()
-        cur.execute("""
+    async with sqlite3.connect("main.db") as conn:
+        cur = await conn.cursor()
+        await cur.execute("""
         SELECT slack_message_ts, slack_channel_id FROM messages WHERE discord_message_id = ?
         """, (payload.message_id,))
-        retrieved = cur.fetchone()
+        retrieved = await cur.fetchone()
         if not retrieved:
             return
         slack_message_ts, slack_channel_id = retrieved
 
-        cur.execute("""
+        await cur.execute("""
         SELECT slack_token FROM members WHERE discord_user_id = ?
         """, (payload.user_id,))
-        retrieved = cur.fetchone()
+        retrieved = await cur.fetchone()
+        await cur.close()
         if not retrieved:
             return
         slack_token = retrieved[0]
@@ -1087,7 +1159,8 @@ intents.message_content = True
 threading.Thread(target=dbot.run, args=(open("discord_token", "r").read(),)).start()
 time.sleep(4)
 asyncio.set_event_loop(dbot.loop)
-try_setup_sql_first_time()
+asyncio.run_coroutine_threadsafe(create_database(), loop=dbot.loop)
+asyncio.run_coroutine_threadsafe(try_setup_sql_first_time(), loop=dbot.loop)
 asyncio.run_coroutine_threadsafe(start_main(), loop=dbot.loop)
 threading.Thread(target=flask_app.run, kwargs={"port": 3000}).start()
 #print(asyncio.run(get_oauth_url(dbot.get_user(bot_owner_discord_user_id)),)) # generate an oauth url for my discord user
