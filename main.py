@@ -335,8 +335,9 @@ async def db_add_message(s_message_data, d_message_object, source="slack"):
     INSERT INTO messages(slack_message_ts, discord_message_id, slack_channel_id, discord_channel_id, slack_thread_ts, slack_author_id, discord_author_id, discord_thread_id)
     VALUES(?, ?, ?, ?, ?, ?, ?, ?)
     """
+
     try:
-        slack_thread_ts = s_message_data["thread_ts"]
+        slack_thread_ts = s_message_data["message"]["thread_ts"]
     except KeyError:
         slack_thread_ts = ""
     if type(d_message_object.channel) == discord.Thread:
@@ -1017,8 +1018,7 @@ async def on_message(message): # Discord message listening, send to slack
         return
     elif message.webhook_id != None: # Don't repost messages from the webhook
         return
-    elif message.channel.type in ["public_thread", "private_thread"]:
-        message.reply("Sorry, threads aren't supported yet!")
+    elif not message.content:
         return
     elif message.guild.id == discord_server_id:
         if type(message.channel) == discord.channel.Thread:
@@ -1029,11 +1029,19 @@ async def on_message(message): # Discord message listening, send to slack
                 SELECT slack_thread_ts FROM messages WHERE discord_thread_id = ?
                 """, (message.channel.id,))
                 retrieved = await cur.fetchone()
-                await cur.close()
+
                 if retrieved:
                     slack_thread_ts = retrieved[0]
                 else:
-                    slack_thread_ts = ""
+                    await cur.execute("""
+                    SELECT slack_message_ts FROM messages WHERE discord_message_id = ?
+                    """, (message.channel.starter_message.id,))
+                    retrieved = await cur.fetchone()
+                    if retrieved:
+                        slack_thread_ts = retrieved[0]
+                    else:
+                        slack_thread_ts = ""
+                await conn.close()
         else:
             slack_channel_id = await discord_channel_to_slack_channel(message.channel.id)
             slack_thread_ts = ""
@@ -1052,6 +1060,7 @@ async def on_message(message): # Discord message listening, send to slack
                                                        icon_url=message.author.avatar.url,
                                                        thread_ts=slack_thread_ts
                                                        )
+            #print(s_message)
             #s_message = await sclient.chat_postMessage(channel=slack_channel_id, text=message.content, username=message.author.display_name, icon_url=message.author.avatar.url) # , thread_ts="1730500285.549289"
             await db_add_message(s_message_data=s_message, d_message_object=message, source="discord")
         except BoltError as e:
